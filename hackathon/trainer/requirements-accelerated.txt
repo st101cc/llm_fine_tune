@@ -1,0 +1,4 @@
+# Optional QLoRA fast path. ForgeTune automatically falls back to
+# Transformers + TRL + PEFT when this extra is not installed.
+-r requirements.txt
+unsloth>=2025.1

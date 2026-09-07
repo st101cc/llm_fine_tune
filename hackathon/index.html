@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08111f" />
+    <title>ForgeTune — Local model training</title>
+    <meta name="description" content="Fine-tune language models on your own computer." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="advisor.css" />
+    <link rel="stylesheet" href="history.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#/workspace"><span class="brand-mark">✦</span><span>ForgeTune<small>local model studio</small></span></a>
+        <nav>
+          <a href="#/workspace" data-route="workspace">◈ Workspace</a>
+          <a href="#/runs" data-route="runs">◷ Training runs</a>
+          <a href="#/models" data-route="models">◇ Model catalog</a>
+        </nav>
+        <section class="hardware-card">
+          <span class="eyebrow">Local compute</span>
+          <strong id="gpu-name">Checking GPU…</strong>
+          <span id="gpu-memory">24 GB VRAM detected</span>
+          <div class="status-line"><i></i><span id="trainer-status">Trainer not connected</span></div>
+        </section>
+        <p class="privacy-note">Your datasets and weights stay on this computer.</p>
+      </aside>
+      <main id="app" class="content" tabindex="-1"></main>
+    </div>
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

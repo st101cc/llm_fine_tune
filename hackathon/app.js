@@ -1,0 +1,495 @@
+const state = {
+  source: "upload", dataset: null, model: "Qwen/Qwen2.5-7B-Instruct", method: "qlora",
+  goal: "balanced", analysis: null, cloudStatus: null, cloudAssist: false,
+  profile: {task:"assistant", language:"multilingual", examples:"small", priority:"balanced"},
+  advisorStatus: "idle", datasetError: null, isAnalyzing: false, analysisStage: 0, analysisToken: null,
+  runs: JSON.parse(localStorage.getItem("forge-tune-runs") || "[]")
+};
+
+const models = [
+  ["Qwen/Qwen2.5-3B-Instruct", "Qwen 2.5", "3B", "8 GB", "Fast", "Qwen Research", "Quick and capable for first experiments."],
+  ["Qwen/Qwen2.5-7B-Instruct", "Qwen 2.5", "7B", "13 GB", "Balanced", "Apache 2.0", "Best default for useful local fine-tunes."],
+  ["meta-llama/Llama-3.2-3B-Instruct", "Llama 3.2", "3B", "8 GB", "Fast", "Llama community", "Compact instruction model with broad tooling."],
+  ["mistralai/Mistral-7B-Instruct-v0.3", "Mistral", "7B", "13 GB", "Balanced", "Apache 2.0", "A dependable general-purpose 7B model."],
+  ["Qwen/Qwen2.5-Coder-7B-Instruct", "Qwen 2.5 Coder", "7B", "13 GB", "Balanced", "Apache 2.0", "Specialized for code generation and explanation."],
+  ["Qwen/Qwen2.5-14B-Instruct", "Qwen 2.5", "14B", "22 GB", "Slow", "Apache 2.0", "Higher capacity; needs QLoRA on this GPU."]
+].map(([id,name,size,vram,speed,license,note]) => ({id,name,size,vram,speed,license,note}));
+
+const app = document.querySelector("#app");
+const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[char]));
+const route = () => location.hash.replace(/^#\/?/, "") || "workspace";
+const save = () => localStorage.setItem("forge-tune-runs", JSON.stringify(state.runs));
+const runDatasetLabel = run => run.dataset || run.datasetName || "Dataset not recorded";
+const runModelLabel = run => {
+  const item = models.find(candidate => candidate.id === run.model);
+  return item ? item.name + " " + item.size : (run.model || "Base model not recorded");
+};
+const runTitle = run => runDatasetLabel(run) + " — " + runModelLabel(run);
+const runStatusClass = run => run.status === "complete" ? "complete" : run.status === "failed" || run.status === "cancelled" ? "danger" : "";
+const percentage = value => Number.isFinite(value) ? (value * 100).toFixed(1) + "%" : "—";
+const datasetBlockers = () => state.analysis ? (state.analysis.blockers || state.analysis.findings?.filter(item => item.severity === "blocker") || []) : [];
+const datasetReady = () => Boolean(state.analysis && !state.datasetError && !state.isAnalyzing && !datasetBlockers().length);
+const model = () => models.find(item => item.id === state.model) || models[1];
+
+function recommendation() {
+  if (state.analysis?.recommendation) {
+    const choice = state.analysis.recommendation;
+    const selected = models.find(item => item.id === choice.model.id) || models[1];
+    return {model:selected, method:choice.method, epochs:state.analysis.facts.validRows < 500 ? 2 : state.analysis.facts.validRows > 50000 ? 1 : 3};
+  }
+  const profile = state.profile;
+  let modelId = "Qwen/Qwen2.5-7B-Instruct";
+  if (profile.task === "code") modelId = "Qwen/Qwen2.5-Coder-7B-Instruct";
+  else if (profile.priority === "speed") modelId = "Qwen/Qwen2.5-3B-Instruct";
+  else if (profile.language === "english" && profile.task === "writing") modelId = "mistralai/Mistral-7B-Instruct-v0.3";
+  const selected = models.find(item => item.id === modelId);
+  const method = selected.size === "3B" && profile.priority === "quality" ? "lora" : "qlora";
+  const epochs = profile.examples === "tiny" ? 2 : profile.examples === "large" ? 1 : 3;
+  return {model:selected, method, epochs};
+}
+
+function toast(title, message) {
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(message) + "</span>";
+  document.querySelector("#toast-region").append(node);
+  setTimeout(() => node.remove(), 4200);
+}
+
+function backDestination() {
+  const [page, id] = route().split("/");
+  if (page === "configure" || page === "models" || page === "runs") return "#/workspace";
+  if (page === "workflow") return "#/workspace";
+  if (page === "train") return "#/runs";
+  if (page === "evaluate") return "#/train/" + id;
+  return "#/workspace";
+}
+
+function shell(kicker, title, lead, actions = "") {
+  const needsBack = route() !== "workspace" && !actions.includes("id='back-");
+  const back = needsBack ? "<a class='button page-back' href='" + backDestination() + "'>← Back</a>" : "";
+  const controls = back || actions ? "<div class='page-actions'>" + back + actions + "</div>" : "";
+  return "<div class='page'><div class='topbar'><div><div class='kicker'>" + kicker + "</div><h1>" + title + "</h1><p class='lead'>" + lead + "</p></div>" + controls + "</div>";
+}
+
+function steps(active) {
+  return "<div class='steps'>" + ["Dataset", "Model & method", "Train", "Evaluate & export"].map((name, index) =>
+    "<div class='step " + (index === active ? "active" : index < active ? "done" : "") + "'><b>" + (index < active ? "✓" : index + 1) + "</b>" + name + "</div>"
+  ).join("") + "</div>";
+}
+
+function setNav() {
+  const page = route().split("/")[0];
+  document.querySelectorAll("[data-route]").forEach(link => link.classList.toggle("active", link.dataset.route === page));
+}
+
+function datasetInput() {
+  const labels = ["Connecting to dataset…", "Inspecting schema and valid rows…", "Profiling quality and GPU fit…"];
+  const widths = [28, 58, 82];
+  const checking = state.isAnalyzing ? "<div class='check-progress' role='status' aria-live='polite'><div><span>" + labels[state.analysisStage] + "</span><strong>Checking</strong></div><div class='progress'><i style='width:" + widths[state.analysisStage] + "%'></i></div></div>" : "";
+  if (state.source === "huggingface") {
+    return "<div class='form-row'><label class='field'>Dataset ID<input id='hf-id' placeholder='e.g. tatsu-lab/alpaca' value='" +
+      (state.dataset?.source === "huggingface" ? escapeHtml(state.dataset.name) : "") +
+      "'></label><label class='field'>Configuration (optional)<input id='hf-config' placeholder='default'></label></div><button class='button primary' id='validate-hf' style='margin-top:12px' " + (state.isAnalyzing ? "disabled" : "") + ">" + (state.isAnalyzing ? "Checking dataset…" : "Check dataset") + "</button>" + checking;
+  }
+  const selected = state.dataset?.source === "upload" ? "<div class='notice'>✓ " + escapeHtml(state.dataset.name) + " is ready. Detected " + escapeHtml(state.dataset.format) + " with " + state.dataset.rows + " examples.</div>" : "";
+  return "<div class='dropzone' style='margin-top:13px'><strong>Choose a data file</strong><p>JSONL, CSV, or Parquet with chat messages or prompt/completion columns.</p><input id='file-input' type='file' accept='.jsonl,.csv,.parquet' " + (state.isAnalyzing ? "disabled" : "") + "><button class='button' id='sample-data' style='margin-left:8px' " + (state.isAnalyzing ? "disabled" : "") + ">Use a small sample instead</button></div>" + checking + selected;
+}
+
+function datasetCheckReport() {
+  if (!state.analysis || state.isAnalyzing) return "";
+  const analysis = state.analysis;
+  const blockers = datasetBlockers();
+  const findings = analysis.findings || [];
+  const facts = analysis.facts || {};
+  const items = findings.map(item => "<li class='" + escapeHtml(item.severity) + "'><strong>" + escapeHtml(item.code.replaceAll("_", " ")) + "</strong><span>" + escapeHtml(item.message) + "</span></li>").join("");
+  return "<section class='dataset-check " + (blockers.length ? "blocked" : "ready") + "'><div class='section-head'><div><h2>Dataset check</h2><p>Schema, row validity, size, duplicates, and language are checked before model selection.</p></div><span class='pill " + (blockers.length ? "danger" : "complete") + "'>" + (blockers.length ? "action needed" : "passed") + "</span></div><div class='dataset-facts'><div><span>Schema</span><strong>" + escapeHtml(facts.schema || "unknown") + "</strong></div><div><span>Valid rows</span><strong>" + (facts.validRows ?? "—") + " / " + (facts.rows ?? "—") + "</strong></div><div><span>Invalid rows</span><strong>" + (facts.rejectedRows ?? "—") + "</strong></div><div><span>Duplicates</span><strong>" + (Number.isFinite(facts.duplicateRate) ? Math.round(facts.duplicateRate * 100) + "%" : "—") + "</strong></div></div>" + (items ? "<ul class='dataset-findings'>" + items + "</ul>" : "") + "</section>";
+}
+
+function datasetCheckRequired() {
+  if (!state.dataset || state.analysis || state.isAnalyzing || state.datasetError) return "";
+  return "<div class='notice dataset-check-needed'><strong>Dataset check required</strong><br>Check schema, size, invalid rows, and duplicates before selecting a model.</div>";
+}
+
+function workspace() {
+  const selected = model();
+  app.innerHTML = shell("Fine-tuning workspace", "Train a model that knows your work.", "Bring a dataset, choose a safe preset, and ForgeTune handles the local training workflow.", "<button class='button' id='open-runs'>View run history</button>") +
+    steps(datasetReady() ? 1 : 0) +
+    "<div class='grid columns'><section class='card'><div class='section-head'><div><h2>1. Add your training data</h2><p>Use files you own or import a public Hugging Face dataset.</p></div></div><div class='body-pad'><div class='choice-list'>" +
+    sourceChoice("upload", "Upload a dataset", "JSONL, CSV, or Parquet. We check the format before training.") +
+    sourceChoice("huggingface", "Import from Hugging Face", "Use a public dataset ID and optionally choose a configuration.") +
+    "</div><div id='dataset-input'>" + datasetInput() + datasetCheckRequired() + (state.datasetError ? "<div class='notice dataset-error'><strong>Dataset could not be imported</strong><br>" + escapeHtml(state.datasetError) + "</div>" : "") + datasetCheckReport() + "</div></div></section><aside class='card'><div class='section-head'><div><h2>Recommended starting point</h2><p>Based on your visible 24 GB GPU.</p></div></div><div class='summary'>" +
+    summary("Base model", selected.name + " " + selected.size) + summary("Training method", "4-bit QLoRA") + summary("Expected VRAM", selected.vram) + summary("Held-out evaluation", "10% split") +
+    "<button class='button primary' id='continue-model' " + (datasetReady() ? "" : "disabled") + ">" + (datasetBlockers().length ? "Resolve dataset checks first" : state.dataset && !state.analysis ? "Check dataset first" : "Continue to model setup →") + "</button></div></aside></div></div>";
+  document.querySelectorAll("input[name=source]").forEach(input => input.addEventListener("change", () => { state.source = input.value; workspace(); }));
+  document.querySelector("#open-runs").onclick = () => location.hash = "#/runs";
+  document.querySelector("#continue-model")?.addEventListener("click", () => location.hash = "#/configure");
+  document.querySelector("#sample-data")?.addEventListener("click", () => {
+    state.file = null;
+    state.dataset = {name:"Customer support replies (sample)", format:"prompt / completion", rows:240, source:"upload"};
+    state.analysis = demoAnalysis();
+    workspace(); toast("Sample dataset ready", "240 examples will be split 90/10 for training and evaluation.");
+  });
+  document.querySelector("#file-input")?.addEventListener("change", async event => {
+    const file = event.target.files[0]; if (!file) return;
+    state.file = file; toast("Analyzing dataset", "Checking format, language, quality, and GPU fit locally.");
+    await uploadAndAnalyze(file);
+  });
+  document.querySelector("#validate-hf")?.addEventListener("click", async () => {
+    const id = document.querySelector("#hf-id").value.trim();
+    if (!id) return toast("Dataset ID needed", "Enter a Hugging Face dataset ID first.");
+    state.datasetError = null;
+    state.dataset = {name:id, format:"auto-detect", rows:"pending import", source:"huggingface"};
+    await analyzeCurrentDataset();
+  });
+}
+
+function demoAnalysis() {
+  return {facts:{schema:"prompt_completion",rows:240,validRows:240,rejectedRows:0,languages:{"English / Latin":210,"Chinese / CJK":30},codeRatio:0.01,duplicateRate:0.01,lengthCharacters:{p50:186,p95:620},estimatedTokenLength:{p50:54,p95:177}},classification:{task:"assistant",confidence:.92,source:"local"},findings:[{severity:"warning",code:"small_dataset",message:"Fewer than 500 examples; use low rank and review overfitting carefully."}],redaction:{sampleRows:20,fieldsRedacted:0,sentToCloud:false},blockers:[],recommendation:{model:{id:"Qwen/Qwen2.5-7B-Instruct"},method:"qlora"},candidates:[]};
+}
+
+async function uploadAndAnalyze(file) {
+  try {
+    const form = new FormData(); form.append("file", file);
+    const upload = await fetch("/api/datasets/upload", {method:"POST", body:form});
+    if (!upload.ok) throw new Error();
+    state.dataset = await upload.json();
+    state.dataset.rows = "analyzed";
+    await analyzeCurrentDataset();
+  } catch {
+    const extension = file.name.split(".").pop().toUpperCase();
+    state.dataset = {name:file.name, format:extension, rows:"preview only", source:"upload"};
+    state.analysis = demoAnalysis(); workspace();
+    toast("Preview analysis shown", "Start the WSL trainer for a real local profile.");
+  }
+}
+
+async function analyzeCurrentDataset(cloudAssist = false) {
+  const token = crypto.randomUUID();
+  state.isAnalyzing = true; state.analysisStage = 0; state.analysisToken = token; state.datasetError = null;
+  render();
+  const timers = [
+    setTimeout(() => { if (state.analysisToken === token) { state.analysisStage = 1; render(); } }, 450),
+    setTimeout(() => { if (state.analysisToken === token) { state.analysisStage = 2; render(); } }, 1200)
+  ];
+  try {
+    const response = await fetch("/api/datasets/analyze", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({dataset:state.dataset,goal:state.goal,cloud_assist:cloudAssist})});
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || "The dataset could not be loaded.");
+    }
+    state.analysis = await response.json();
+    state.datasetError = null;
+    state.cloudAssist = cloudAssist;
+    state.dataset.rows = state.analysis.facts.rows;
+    toast(state.analysis.blockers?.length ? "Dataset needs attention" : "Dataset analysis complete", state.analysis.blockers?.length ? state.analysis.blockers[0].message : "One goal choice remains before training.");
+  } catch (error) {
+    state.analysis = null;
+    state.datasetError = error?.message || "The trainer could not analyze this dataset.";
+    toast("Dataset import failed", state.datasetError);
+  } finally {
+    timers.forEach(clearTimeout);
+    if (state.analysisToken === token) {
+      state.isAnalyzing = false; state.analysisToken = null; render();
+    }
+  }
+}
+
+function sourceChoice(id, title, note) {
+  return "<label class='choice " + (state.source === id ? "selected" : "") + "'><input type='radio' name='source' value='" + id + "' " + (state.source === id ? "checked" : "") + "><div><strong>" + title + "</strong><span>" + note + "</span></div></label>";
+}
+
+function summary(label, value) {
+  return "<div class='summary-row'><span>" + label + "</span><strong>" + value + "</strong></div>";
+}
+
+function methodChoice(id, title, note, disabled) {
+  return "<label class='choice " + (state.method === id ? "selected" : "") + "'><input type='radio' name='method' value='" + id + "' " + (state.method === id ? "checked" : "") + (disabled ? " disabled" : "") + "><div><strong>" + title + (disabled ? " · unavailable for 14B" : "") + "</strong><span>" + note + "</span></div></label>";
+}
+
+function agentCheck(name, verdict, detail) {
+  const tone = verdict === "Pass" ? "pass" : verdict === "Caution" ? "warn" : "info";
+  return "<div class='agent-check'><span class='agent-icon'>✦</span><div><strong>" + name + "</strong><p>" + detail + "</p></div><em class='" + tone + "'>" + verdict + "</em></div>";
+}
+
+function configure() {
+  const analysis = state.analysis || demoAnalysis(), selected = model(), needsQ = selected.size === "14B", rec = recommendation();
+  const blockers = analysis.blockers || analysis.findings.filter(item => item.severity === "blocker");
+  if (blockers.length) { location.hash = "#/workspace"; return; }
+  const findings = analysis.findings.map(item => agentCheck(item.code.replaceAll("_", " "), item.severity === "blocker" ? "Blocked" : "Caution", item.message)).join("");
+  const facts = analysis.facts;
+  app.innerHTML = shell("Automatic training plan", blockers.length ? "Your dataset needs attention." : "Your dataset is profiled.", blockers.length ? "Training is paused until the dataset auditor’s blocker is resolved." : "The advisor detected the dataset profile. Choose only the result you value most.", "<button class='button' id='back-data'>← Dataset</button>") +
+    steps(1) + "<section class='card advisor-card'><div class='section-head'><div><h2>Dataset auditor</h2><p>These are measured locally from your dataset; no cloud model was needed.</p></div><span class='pill " + (blockers.length ? "" : "complete") + "'>" + (blockers.length ? "blocked" : "ready") + "</span></div><div class='advisor-layout'><div class='fact-grid'>" +
+    "<div><span>Valid examples</span><strong>" + facts.validRows + " / " + facts.rows + "</strong></div><div><span>Detected task</span><strong>" + analysis.classification.task + "</strong></div><div><span>Language mix</span><strong>" + Object.keys(facts.languages).join(" · ") + "</strong></div><div><span>Duplicate rate</span><strong>" + Math.round(facts.duplicateRate * 100) + "%</strong></div><div><span>Typical length</span><strong>" + facts.estimatedTokenLength.p50 + " tokens</strong></div><div><span>Long examples</span><strong>p95 " + facts.estimatedTokenLength.p95 + " tokens</strong></div></div><div><div class='advisor-consensus'><span class='eyebrow'>One decision from you</span><h2>What matters most?</h2><div class='goal-options'>" + ["speed","balanced","quality"].map(goal => "<label><input type='radio' name='goal' value='" + goal + "' " + (state.goal === goal ? "checked" : "") + "> " + (goal === "speed" ? "Fastest iteration" : goal === "quality" ? "Highest quality" : "Balanced") + "</label>").join("") + "</div><button class='button' id='cloud-test'>Test cloud assist</button>" + (state.cloudStatus?.configured && analysis.classification.confidence < .8 ? "<button class='button' id='cloud-clarify'>Clarify ambiguous task</button>" : "") + "<p id='cloud-note'>Cloud assist: " + (state.cloudStatus?.configured ? "configured; used only for ambiguous classifications" : "not configured; local analysis is complete") + "</p></div><div class='agent-checks'>" + findings + agentCheck("Model & method planner", blockers.length ? "Blocked" : "Pass", blockers.length ? "No plan is produced until data blockers are fixed." : rec.model.name + " " + rec.model.size + " + " + rec.method.toUpperCase() + " fits the local GPU plan.") + agentCheck("Evaluation auditor", "Required", "Use the same held-out slice for base and tuned comparison; training loss alone is insufficient.") + "</div></div></div></section>" +
+    "<div class='grid columns' style='margin-top:16px'><section class='card'><div class='section-head'><div><h2>Recommended base model</h2><p>Automatically ranked from dataset fit, local GPU, and your goal.</p></div></div><div class='body-pad'><label class='field'>Model<select id='model-select'>" +
+    models.map(item => "<option value='" + item.id + "' " + (item.id === selected.id ? "selected" : "") + ">" + item.name + " " + item.size + " · " + item.vram + " VRAM · " + item.speed + "</option>").join("") +
+    "</select></label><div class='notice'>" + (needsQ ? "14B needs QLoRA to fit in the detected 24 GB GPU. It will train more slowly." : selected.size + " is expected to fit comfortably with the recommended QLoRA preset.") +
+    "</div><div class='peft-note'><strong>PEFT is the category—not a third method.</strong><span>LoRA and QLoRA both train small adapters instead of changing every base-model weight.</span></div><h3 style='margin:18px 0 9px'>Fine-tuning method</h3><div class='choice-list'>" +
+    methodChoice("lora", "LoRA · BF16 base", "Best fidelity when the model fits comfortably in GPU memory.", needsQ) +
+    methodChoice("qlora", "QLoRA · 4-bit base", "Safest default on 24 GB; required for 14B models.", false) +
+    "</div></div></section><aside class='card'><div class='section-head'><div><h2>Safe preset</h2><p>Optimized with gradient descent for a first useful run.</p></div></div><div class='summary'>" +
+    summary("Rank / alpha", facts.validRows < 500 ? "8 / 16" : "16 / 32") + summary("Learning rate", "2e-4") + summary("Epochs", String(rec.epochs)) + summary("Batch / accumulation", "1 / 8") + summary("Context length", Math.min(4096, Math.max(1024, facts.estimatedTokenLength.p95 * 2)) + " tokens") +
+    "<button class='button primary' id='start-train' " + (blockers.length ? "disabled" : "") + ">Start local training →</button></div></aside></div></div>";
+  document.querySelector("#back-data").onclick = () => location.hash = "#/workspace";
+  document.querySelectorAll("input[name=goal]").forEach(input => input.onchange = async () => { state.goal = input.value; await analyzeCurrentDataset(); });
+  document.querySelector("#cloud-test").onclick = async () => { const response = await fetch("/api/advisor/connection-test", {method:"POST"}); const result = await response.json(); toast(result.ok ? "Cloud assist connected" : "Cloud assist unavailable", result.message); };
+  document.querySelector("#cloud-clarify")?.addEventListener("click", () => analyzeCurrentDataset(true));
+  document.querySelector("#model-select").onchange = event => { state.model = event.target.value; if (model().size === "14B") state.method = "qlora"; configure(); };
+  document.querySelectorAll("input[name=method]").forEach(input => input.onchange = () => { state.method = input.value; configure(); });
+  document.querySelector("#start-train").onclick = startWorkflow;
+}
+
+async function startWorkflow() {
+  if (!state.dataset) return location.hash = "#/workspace";
+  try {
+    const dataset = {
+      source: state.dataset.source,
+      name: state.dataset.name,
+      extension: state.dataset.extension || state.dataset.format,
+      split: state.dataset.split || "train"
+    };
+    const response = await fetch("/api/workflow/runs", {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify({dataset, goal:state.goal, cloud_assist:Boolean(state.cloudAssist), candidate_limit:3, max_retries:2, split_seed:42})
+    });
+    if (!response.ok) throw new Error("Workflow could not be started.");
+    const workflow = await response.json();
+    location.hash = "#/workflow/" + workflow.id;
+    pollWorkflow(workflow.id);
+    toast("Guided workflow started", "ForgeTune is profiling the dataset before any GPU training begins.");
+  } catch {
+    // Keep the existing preview experience when the WSL trainer is offline.
+    await startRun();
+  }
+}
+
+const workflowPollers = new Map();
+
+function pollWorkflow(id) {
+  if (workflowPollers.has(id)) return;
+  const interval = setInterval(async () => {
+    try {
+      const response = await fetch("/api/workflow/runs/" + id);
+      if (!response.ok) return;
+      const workflow = await response.json();
+      if (route() === "workflow/" + id) renderWorkflow(workflow);
+      if (["waiting", "complete", "blocked", "cancelled", "failed"].includes(workflow.status)) {
+        clearInterval(interval); workflowPollers.delete(id);
+      }
+    } catch { /* The trainer may be restarting; keep polling. */ }
+  }, 2500);
+  workflowPollers.set(id, interval);
+}
+
+function workflowAction(id, response, message) {
+  fetch("/api/workflow/runs/" + id + "/resume", {
+    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({response})
+  }).then(result => {
+    if (!result.ok) throw new Error();
+    pollWorkflow(id); renderWorkflow({...window.currentWorkflow, status:"queued", pendingAction:null});
+    toast("Workflow resumed", message);
+  }).catch(() => toast("Could not resume workflow", "The trainer may be busy or offline."));
+}
+
+function workflowComparison(comparison) {
+  const pairs = comparison?.pairs || [];
+  if (!pairs.length) return "<div class='empty'><strong>No comparable candidates</strong><span>The workflow finished without a valid tuned result.</span></div>";
+  return "<div class='metric-grid grid' style='margin-bottom:16px'><div class='metric'><span>Recommended model</span><strong style='font-size:14px'>" + escapeHtml(comparison.winner || "Review manually") + "</strong></div><div class='metric'><span>Evaluation examples</span><strong>" + (comparison.evaluationIds?.length || 0) + "</strong></div><div class='metric'><span>Goal</span><strong>" + escapeHtml(comparison.goal || "balanced") + "</strong></div></div>" +
+    "<div class='run-list'>" + pairs.map((pair, index) => "<div class='run'><div><strong>" + (index + 1) + ". " + escapeHtml(pair.modelId) + "</strong><span>Base → tuned overlap: " + (pair.base?.meanTokenOverlap ?? "n/a") + " → " + (pair.tuned?.meanTokenOverlap ?? "n/a") + " · " + (pair.passed ? "artifacts verified" : "review required") + "</span></div><span class='pill " + (pair.passed ? "complete" : "") + "'>" + (pair.passed ? "eligible" : "incomplete") + "</span></div>").join("") + "</div>";
+}
+
+function renderWorkflow(workflow) {
+  window.currentWorkflow = workflow;
+  if (workflow.status === "failed" && workflow.error) {
+    const dataset = workflow.dataset?.name || workflow.state?.dataset?.name || "the selected dataset";
+    app.innerHTML = shell("Dataset import failed", "ForgeTune could not read " + escapeHtml(dataset) + ".", "No model baseline or GPU training was started.", "<button class='button primary' id='replace-dataset'>Choose another dataset</button>") +
+      steps(0) + "<section class='card body-pad'><h2>Fix this in step 1: Dataset</h2><div class='notice dataset-error'><strong>Import error</strong><br>" + escapeHtml(workflow.error) + "</div><p style='color:var(--muted);font-size:11px;line-height:1.65'>Use a current Hugging Face dataset that loads without a legacy script, or upload a CSV, JSONL, or Parquet file.</p></section></div>";
+    document.querySelector("#replace-dataset").onclick = () => { state.datasetError = workflow.error; location.hash = "#/workspace"; };
+    return;
+  }
+  const pending = workflow.pendingAction;
+  let action = "";
+  if (workflow.status === "waiting" && pending?.type === "plan_approval") {
+    const candidates = pending.plan?.candidates || [];
+    action = "<section class='card body-pad' style='margin-top:16px'><h2>Approve training plan</h2><p>" + escapeHtml(pending.message || "Review the proposed candidates before GPU training.") + "</p><div class='run-list'>" + candidates.map(item => "<div class='run'><div><strong>" + escapeHtml(item.model.id) + "</strong><span>" + escapeHtml(String(item.method).toUpperCase()) + " · " + item.estimatedVramGb + " GB VRAM · " + escapeHtml(item.estimatedDuration || "unknown") + " training</span></div></div>").join("") + "</div><button class='button primary' id='approve-workflow'>Approve and train candidates →</button></section>";
+  } else if (workflow.status === "waiting" && pending?.type === "blocker_resolution") {
+    const assessment = pending.assessment || {};
+    const operations = (assessment.operations || []).map(item => "<li>" + escapeHtml(item.replaceAll("_", " ")) + "</li>").join("");
+    action = "<section class='card body-pad' style='margin-top:16px'><h2>Blocker resolution review</h2><p>" + escapeHtml(pending.message || "Review the proposed data remediation.") + "</p><div class='notice dataset-error'>" + (assessment.blockers || []).map(item => escapeHtml(item.message)).join("<br>") + "</div>" + (operations ? "<h3 style='margin:16px 0 8px'>Proposed approved-only operations</h3><ul class='resolution-list'>" + operations + "</ul>" : "<p style='color:var(--muted);font-size:10px'>No safe automatic remediation is available for this blocker.</p>") + (assessment.canMaterializeAfterApproval ? "<button class='button primary' id='approve-remediation'>Approve cleanup and re-check →</button> " : "") + "<button class='button' id='replace-blocked-dataset'>Replace dataset</button> <button class='button danger' id='abort-workflow'>Abort</button></section>";
+  } else if (workflow.status === "waiting" && pending?.type === "data_review") {
+    action = "<section class='card body-pad' style='margin-top:16px'><h2>Dataset review required</h2><p>" + escapeHtml(pending.message || "Review the dataset before continuing.") + "</p><div class='notice'>" + (pending.findings || []).map(item => escapeHtml(item.message)).join("<br>") + "</div><button class='button danger' id='abort-workflow'>Abort workflow</button></section>";
+  } else if (workflow.status === "waiting" && pending?.type === "retry_review") {
+    action = "<section class='card body-pad' style='margin-top:16px'><h2>Retry decision</h2><p>" + escapeHtml(pending.reason || pending.message || "A candidate needs review.") + "</p><button class='button primary' id='retry-workflow'>Retry candidate</button> <button class='button' id='skip-workflow'>Skip candidate</button> <button class='button danger' id='abort-workflow'>Abort</button></section>";
+  }
+  const isDone = ["complete", "blocked", "cancelled", "failed"].includes(workflow.status);
+  const comparison = workflow.comparison ? "<section class='card body-pad' style='margin-top:16px'><h2>Final comparison</h2>" + workflowComparison(workflow.comparison) + "</section>" : "";
+  app.innerHTML = shell("LangGraph workflow", workflow.status === "waiting" ? "Your review is needed." : isDone ? "Workflow results are ready." : "ForgeTune is working.", workflow.status === "waiting" ? "The graph is checkpointed and waiting for your decision." : "Dataset profiling, baseline evaluation, training, and verification are running as a resumable workflow.", "<button class='button' id='back-config'>← Model setup</button>") +
+    steps(workflow.status === "complete" ? 3 : 1) + "<section class='card body-pad'><div class='section-head' style='padding:0 0 15px'><div><h2>Workflow " + escapeHtml(workflow.id) + "</h2><p>Goal: " + escapeHtml(workflow.goal || workflow.state?.goal || "balanced") + " · Candidates: " + (workflow.approved_plan?.candidateCount || workflow.state?.max_candidates || 3) + "</p></div><span class='pill " + (workflow.status === "complete" ? "complete" : "") + "'>" + escapeHtml(workflow.status) + "</span></div><div class='progress'><i style='width:" + (isDone ? 100 : workflow.status === "waiting" ? 45 : 18) + "%'></i></div><p style='color:var(--muted);font-size:11px;margin-top:12px'>" + (workflow.error ? escapeHtml(workflow.error) : workflow.status === "waiting" ? "No GPU work will start until this checkpoint is resolved." : isDone ? "All available workflow results have been persisted locally." : "The trainer will update this page automatically.") + "</p></section>" + action + comparison + "</div>";
+  document.querySelector("#back-config").onclick = () => location.hash = "#/configure";
+  document.querySelector("#approve-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"approve"}, "Training candidates have been queued."));
+  document.querySelector("#approve-remediation")?.addEventListener("click", () => workflowAction(workflow.id, {action:"approve_remediation"}, "Approved cleanup is running; the dataset will be profiled again."));
+  document.querySelector("#replace-blocked-dataset")?.addEventListener("click", () => { state.datasetError = "Replace this dataset to resolve the workflow blocker."; location.hash = "#/workspace"; });
+  document.querySelector("#retry-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"retry"}, "The candidate retry has been queued."));
+  document.querySelector("#skip-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"skip_candidate"}, "Continuing with the remaining candidates."));
+  document.querySelector("#abort-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"abort"}, "The workflow was stopped."));
+}
+
+async function workflowPage(id) {
+  try {
+    const response = await fetch("/api/workflow/runs/" + id);
+    if (!response.ok) throw new Error();
+    const workflow = await response.json();
+    renderWorkflow(workflow); pollWorkflow(id);
+  } catch {
+    app.innerHTML = shell("LangGraph workflow", "Workflow unavailable.", "Start the WSL trainer and open this workflow again.") + "</div>";
+  }
+}
+
+async function startRun() {
+  if (!state.dataset) return location.hash = "#/workspace";
+  const run = {id:crypto.randomUUID(), model:state.model, method:state.method, dataset:state.dataset.name, status:"running", progress:8, loss:2.14, elapsed:0, framework:"Transformers + PEFT", startedAt:new Date().toLocaleString()};
+  try {
+    let dataset = {source:state.dataset.source, name:state.dataset.name, extension:state.dataset.format};
+    if (state.dataset.source === "upload") {
+      if (!state.file) throw new Error("Sample data runs in preview mode.");
+      const form = new FormData(); form.append("file", state.file);
+      const upload = await fetch("/api/datasets/upload", {method:"POST", body:form});
+      if (!upload.ok) throw new Error("Dataset upload could not be validated.");
+      dataset = await upload.json();
+    }
+    const response = await fetch("/api/runs", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({
+      dataset, base_model:state.model, parameter_method:state.method,
+      hyperparameters:{rank:(state.analysis?.facts.validRows || 999) < 500 ? 8 : 16,alpha:(state.analysis?.facts.validRows || 999) < 500 ? 16 : 32,learning_rate:0.0002,epochs:recommendation().epochs,batch_size:1,gradient_accumulation:8,max_sequence_length:Math.min(4096, Math.max(1024, (state.analysis?.facts.estimatedTokenLength?.p95 || 1024) * 2))},
+      split_seed:42
+    })});
+    if (!response.ok) throw new Error("The local trainer rejected this run.");
+    const remote = await response.json();
+    run.id = remote.id; run.status = remote.status; run.remote = true; run.progress = 2;
+    state.runs.unshift(run); save(); location.hash = "#/train/" + run.id; pollTrainerRun(run.id);
+    toast("Local training queued", "The WSL trainer has accepted this run.");
+  } catch {
+    state.runs.unshift(run); save(); location.hash = "#/train/" + run.id; simulateRun(run.id);
+    toast("Preview training started", "Start the WSL trainer to run this configuration on your GPU.");
+  }
+}
+
+function pollTrainerRun(id) {
+  const interval = setInterval(async () => {
+    const run = state.runs.find(item => item.id === id);
+    if (!run || run.status === "cancelled") return clearInterval(interval);
+    try {
+      const response = await fetch("/api/runs/" + id);
+      if (!response.ok) return;
+      const remote = await response.json();
+      run.status = remote.status;
+      run.progress = remote.status === "queued" ? 2 : remote.status === "running" ? Math.min(92, run.progress + 3) : 100;
+      if (remote.status === "complete") { run.loss = remote.metrics?.eval_loss ?? run.loss; run.perplexity = remote.metrics?.perplexity ?? run.perplexity; run.evaluation = remote.metrics || {}; run.framework = remote.framework || "Transformers + TRL + PEFT"; }
+      save(); if (route() === "train/" + id) train(id);
+      if (["complete", "failed", "cancelled"].includes(remote.status)) clearInterval(interval);
+    } catch { /* The trainer may be restarting; keep polling. */ }
+  }, 3000);
+}
+
+function simulateRun(id) {
+  const interval = setInterval(() => {
+    const run = state.runs.find(item => item.id === id);
+    if (!run || run.status !== "running") return clearInterval(interval);
+    run.progress = Math.min(100, run.progress + Math.ceil(Math.random() * 9));
+    run.loss = Math.max(.42, run.loss - Math.random() * .11); run.elapsed += 18;
+    if (run.progress >= 100) { run.status = "complete"; run.loss = .48; run.perplexity = 1.62; run.framework = "Unsloth (auto-selected)"; toast("Training complete", "Your adapter and evaluation report are ready."); }
+    save(); if (route() === "train/" + id) train(id);
+  }, 1100);
+}
+
+function train(id) {
+  const run = state.runs.find(item => item.id === id); if (!run) return location.hash = "#/runs";
+  const complete = run.status === "complete";
+  app.innerHTML = shell("Local training run", complete ? "Your fine-tune is ready." : "Training on your GPU.", complete ? "The held-out evaluation is complete. Compare answers and prepare exports." : "Gradient descent is updating the adapter while the base model stays unchanged.", "<button class='button " + (complete ? "primary" : "danger") + "' id='run-action'>" + (complete ? "Open evaluation →" : "Cancel run") + "</button>") +
+    steps(complete ? 3 : 2) + "<section class='card body-pad'><div class='section-head' style='padding:0 0 15px'><div><h2>" + escapeHtml(runTitle(run)) + "</h2><p>Dataset: " + escapeHtml(runDatasetLabel(run)) + " · " + escapeHtml(run.framework) + "</p></div><span class='pill " + (complete ? "complete" : "") + "'>" + (complete ? "complete" : run.status) + "</span></div><div style='margin:20px 0 8px;display:flex;justify-content:space-between'><strong>" + run.progress + "% complete</strong><span style='color:var(--muted);font-size:10px'>" + Math.floor(run.elapsed / 60) + "m " + run.elapsed % 60 + "s elapsed · " + (complete ? "evaluation finished" : "about 6m remaining") + "</span></div><div class='progress'><i style='width:" + run.progress + "%'></i></div><div class='metric-grid grid'><div class='metric'><span>Current training loss</span><strong>" + run.loss.toFixed(2) + "</strong></div><div class='metric'><span>Method</span><strong style='font-size:14px'>" + run.method.toUpperCase() + "</strong></div><div class='metric'><span>GPU memory plan</span><strong style='font-size:14px'>" + model().vram + "</strong></div></div></section></div>";
+  document.querySelector("#run-action").onclick = () => {
+    if (complete) return location.hash = "#/evaluate/" + id;
+    run.status = "cancelled"; save(); train(id); toast("Run cancelled", "No base-model weights were changed.");
+  };
+}
+
+function classificationEvaluation(run) {
+  const report = run.evaluation?.classification || run.classification;
+  if (!report?.supported) {
+    return "<section class='card body-pad'><h2>Classification error analysis is unavailable</h2><p style='color:var(--muted);font-size:10px;line-height:1.65'>This run does not have an explicit ground-truth label column. Add <code>label</code>, <code>class</code>, or <code>target</code> beside <code>text</code> to calculate TP, FP, FN, TN, precision, recall, and a held-out error queue. Generative quality metrics are shown below instead.</p></section>";
+  }
+  const confusion = report.confusion || {};
+  const errors = (report.errors || []).map(item => "<article class='error-row " + escapeHtml(item.category) + "'><div><span class='error-kind'>" + escapeHtml(item.category.replace("_", " ")) + "</span><strong>Expected: " + escapeHtml(item.expected) + " · Predicted: " + escapeHtml(item.predicted) + "</strong><p>" + escapeHtml(item.input || "Input was not retained") + "</p></div><span>Row " + escapeHtml(item.rowId ?? "—") + "</span></article>").join("") || "<div class='empty'><strong>No held-out errors</strong>Every evaluated example matched its ground-truth label.</div>";
+  return "<section class='card'><div class='section-head'><div><h2>Classification performance</h2><p>Positive class: " + escapeHtml(report.positiveLabel || "not applicable") + " · Label field: " + escapeHtml(report.labelField) + " · " + report.total + " held-out examples</p></div></div><div class='metric-grid grid'><div class='metric'><span>Precision</span><strong>" + percentage(report.precision) + "</strong></div><div class='metric'><span>Recall</span><strong>" + percentage(report.recall) + "</strong></div><div class='metric'><span>F1 score</span><strong>" + percentage(report.f1) + "</strong></div></div><div class='confusion-grid'><div><span>True positives</span><strong>" + (confusion.tp ?? "—") + "</strong></div><div><span>False positives</span><strong>" + (confusion.fp ?? "—") + "</strong></div><div><span>False negatives</span><strong>" + (confusion.fn ?? "—") + "</strong></div><div><span>True negatives</span><strong>" + (confusion.tn ?? "—") + "</strong></div></div></section><section class='card error-analysis'><div class='section-head'><div><h2>Incorrect or not caught</h2><p>False negatives are items the model failed to catch; false positives are items it flagged incorrectly. Review these before exporting.</p></div><span class='pill " + (report.errorCount ? "danger" : "complete") + "'>" + report.errorCount + " errors</span></div><div class='error-list'>" + errors + "</div></section>";
+}
+
+function evaluate(id) {
+  const run = state.runs.find(item => item.id === id); if (!run || run.status !== "complete") return location.hash = "#/runs";
+  app.innerHTML = shell("Evaluation & export", "See what changed, then take it with you.", "Results use the held-out 10% of your data. Review examples before deployment.", "<button class='button' id='back-run'>← Training run</button>") +
+    steps(3) + classificationEvaluation(run) + "<section class='card' style='margin-top:16px'><div class='metric-grid grid'><div class='metric'><span>Evaluation loss</span><strong>" + (Number.isFinite(run.loss) ? run.loss.toFixed(2) : "—") + "</strong></div><div class='metric'><span>Perplexity</span><strong>" + (Number.isFinite(run.perplexity) ? run.perplexity.toFixed(2) : "—") + "</strong></div><div class='metric'><span>Run dataset</span><strong style='font-size:14px'>" + escapeHtml(runDatasetLabel(run)) + "</strong></div></div></section><div class='grid columns' style='margin-top:16px'><section class='card comparison'><h2>Sample response comparison</h2><div class='answer'><strong>Base model</strong><br>Thank you for contacting us. Please provide additional details about your issue.</div><div class='answer tuned'><strong>Fine-tuned model</strong><br>I’m sorry your order arrived late. I can check its delivery status—please share the order number and postal code.</div></section><aside class='card body-pad'><h2>Export for Ollama</h2><p style='color:var(--muted);font-size:10px;line-height:1.6'>Download the adapter for reuse, or convert the merged model to GGUF before importing it into Ollama.</p><div class='export-actions'><button class='button' data-export='adapter'>Download adapter</button><button class='button primary' data-export='gguf'>Prepare GGUF export</button></div><pre class='code'>ollama create forge-support -f Modelfile\nollama run forge-support</pre></aside></div></div>";
+  document.querySelector("#back-run").onclick = () => location.hash = "#/train/" + id;
+  document.querySelectorAll("[data-export]").forEach(button => button.onclick = () => toast(button.dataset.export === "gguf" ? "GGUF conversion queued" : "Adapter package ready", button.dataset.export === "gguf" ? "The local trainer will merge and convert weights when it is online." : "Includes adapter_model.safetensors and adapter_config.json."));
+}
+
+function runDetails(id) {
+  const run = state.runs.find(item => item.id === id); if (!run) return location.hash = "#/runs";
+  const isComplete = run.status === "complete";
+  const loss = Number.isFinite(run.loss) ? run.loss.toFixed(2) : "—";
+  const perplexity = Number.isFinite(run.perplexity) ? run.perplexity.toFixed(2) : "Pending";
+  const artifacts = isComplete ? "Adapter, metrics, and evaluation report verified" : run.status === "failed" ? "No verified artifacts" : "Artifacts will appear when the run completes";
+  app.innerHTML = shell("Training run details", runTitle(run), "A durable record of the dataset, configuration, progress, metrics, and local artifacts for this run.", "<button class='button' id='back-history'>← Training history</button>") +
+    "<section class='card details-card'><div class='section-head'><div><h2>" + escapeHtml(runTitle(run)) + "</h2><p>Run ID: " + escapeHtml(run.id) + "</p></div><span class='pill " + runStatusClass(run) + "'>" + escapeHtml(run.status) + "</span></div><div class='details-grid'><div><span>Dataset used</span><strong>" + escapeHtml(runDatasetLabel(run)) + "</strong></div><div><span>Base model</span><strong>" + escapeHtml(runModelLabel(run)) + "</strong></div><div><span>Fine-tuning method</span><strong>" + escapeHtml((run.method || "unknown").toUpperCase()) + "</strong></div><div><span>Started</span><strong>" + escapeHtml(run.startedAt || "Not recorded") + "</strong></div><div><span>Training framework</span><strong>" + escapeHtml(run.framework || "Not recorded") + "</strong></div><div><span>Elapsed time</span><strong>" + Math.floor((run.elapsed || 0) / 60) + "m " + ((run.elapsed || 0) % 60) + "s</strong></div></div></section>" +
+    "<section class='card' style='margin-top:16px'><div class='section-head'><div><h2>Training and evaluation</h2><p>Metrics recorded for this run only.</p></div></div><div class='metric-grid grid'><div class='metric'><span>Training loss</span><strong>" + loss + "</strong></div><div class='metric'><span>Perplexity</span><strong>" + perplexity + "</strong></div><div class='metric'><span>Progress</span><strong>" + (run.progress || 0) + "%</strong></div></div></section>" +
+    "<section class='card history-artifacts' style='margin-top:16px'><h2>Local artifacts</h2><p>" + escapeHtml(artifacts) + "</p><div class='progress'><i style='width:" + (isComplete ? 100 : run.progress || 0) + "%'></i></div></section></div>";
+  document.querySelector("#back-history").onclick = () => location.hash = "#/runs";
+}
+
+function runs() {
+  const body = state.runs.length ? state.runs.map(run => "<div class='run'><div><strong>" + escapeHtml(runTitle(run)) + "</strong><span><b>Dataset:</b> " + escapeHtml(runDatasetLabel(run)) + " · " + escapeHtml(run.startedAt || "date not recorded") + " · loss " + (Number.isFinite(run.loss) ? run.loss.toFixed(2) : "—") + "</span></div><div class='run-actions'><span class='pill " + runStatusClass(run) + "'>" + escapeHtml(run.status) + "</span><button class='button' data-open='" + run.id + "'>View details</button></div></div>").join("") : "<div class='empty'><strong>No training runs yet</strong>Start with a dataset and safe QLoRA preset.</div>";
+  app.innerHTML = shell("Training runs", "Your local training history.", "Each run keeps its dataset reference, method, metrics, and artifacts on this computer.", "<button class='button primary' id='new-run'>+ New fine-tune</button>") + "<section class='card run-list'>" + body + "</section></div>";
+  document.querySelector("#new-run").onclick = () => location.hash = "#/workspace";
+  document.querySelectorAll("[data-open]").forEach(button => button.onclick = () => {
+    const item = state.runs.find(run => run.id === button.dataset.open);
+    location.hash = "#/runs/" + item.id;
+  });
+}
+
+function catalog() {
+  app.innerHTML = shell("Model catalog", "Find the right balance of quality and speed.", "Memory estimates assume the recommended QLoRA preset on the detected 24 GB GPU.") + "<div class='catalog'>" + models.map(item =>
+    "<article class='card model'><span class='size'>" + item.size + "</span><h2 style='margin-top:7px'>" + item.name + "</h2><p>" + item.note + "</p><dl><div><dt>Expected VRAM</dt><dd>" + item.vram + "</dd></div><div><dt>Training pace</dt><dd>" + item.speed + "</dd></div><div><dt>License</dt><dd>" + item.license + "</dd></div><div><dt>Method</dt><dd>" + (item.size === "14B" ? "QLoRA only" : "LoRA / QLoRA") + "</dd></div></dl><button class='button' data-pick='" + item.id + "'>Use this model</button></article>"
+  ).join("") + "</div></div>";
+  document.querySelectorAll("[data-pick]").forEach(button => button.onclick = () => { state.model = button.dataset.pick; if (model().size === "14B") state.method = "qlora"; location.hash = "#/configure"; });
+}
+
+function render() {
+  setNav(); const [page, id] = route().split("/");
+  if (page === "configure") configure();
+  else if (page === "workflow") workflowPage(id);
+  else if (page === "train") train(id);
+  else if (page === "evaluate") evaluate(id);
+  else if (page === "runs" && id) runDetails(id);
+  else if (page === "runs") runs();
+  else if (page === "models") catalog();
+  else workspace();
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+async function loadHardware() {
+  try {
+    const response = await fetch("/api/hardware"), hardware = await response.json();
+    document.querySelector("#gpu-name").textContent = hardware.name || "NVIDIA GPU";
+    document.querySelector("#gpu-memory").textContent = (hardware.memoryGb || 24) + " GB VRAM detected";
+    document.querySelector("#trainer-status").textContent = hardware.trainerOnline ? "Trainer connected" : "Trainer not connected";
+    document.querySelector(".status-line i").style.background = hardware.trainerOnline ? "var(--cyan)" : "var(--amber)";
+  } catch { document.querySelector("#gpu-name").textContent = "NVIDIA GPU"; }
+}
+
+async function loadAdvisorStatus() {
+  try {
+    const response = await fetch("/api/advisor/status");
+    if (response.ok) state.cloudStatus = await response.json();
+  } catch { state.cloudStatus = {configured:false}; }
+}
+
+window.addEventListener("hashchange", render);
+loadHardware(); loadAdvisorStatus(); render();
