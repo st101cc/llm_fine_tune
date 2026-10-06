@@ -1,0 +1,26 @@
+# Local environments and dependencies
+.venv/
+venv/
+node_modules/
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Runtime datasets, databases, logs, models, and adapters
+.forge-data/
+/hackathon/trainer/data/
+*.log
+
+# Local credentials; keep configuration examples
+.env
+.env.*
+!.env.example
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db

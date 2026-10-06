@@ -3,6 +3,11 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {handleCompass} from "./compass.mjs";
+import {streamTrainer} from "./quality-proxy.mjs";
+
+try {process.loadEnvFile(fileURLToPath(new URL("../.env", import.meta.url)));} catch(error) {if(error.code!=="ENOENT") throw error;}
+
 const root = fileURLToPath(new URL(".", import.meta.url));
 const port = Number(process.env.PORT || 4173);
 const trainerUrl = process.env.TRAINER_URL || "http://127.0.0.1:8000";
@@ -20,17 +25,22 @@ async function callTrainer(path, request) {
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://" + request.headers.host);
+  if (await handleCompass(request, response, url, trainerUrl)) return;
   if (url.pathname === "/api/hardware") {
     try {
       const result = await callTrainer("/hardware", request);
       response.writeHead(result.status, { "content-type": result.type }); response.end(result.body);
     } catch {
       response.writeHead(200, {"content-type":"application/json"});
-      response.end(JSON.stringify({name:"NVIDIA GeForce RTX 5090 Laptop GPU", memoryGb:24, trainerOnline:false}));
+      response.end(JSON.stringify({name:"GPU not detected", memoryGb:0, trainerOnline:false}));
     }
     return;
   }
   if (url.pathname.startsWith("/api/")) {
+    if (request.method === "GET" && /^\/api\/quality\/(versions|evaluations)\/[^/]+\/export$/.test(url.pathname)) {
+      await streamTrainer(trainerUrl + url.pathname.slice(4) + url.search, request, response);
+      return;
+    }
     try {
       const result = await callTrainer(url.pathname.slice(4) + url.search, request);
       response.writeHead(result.status, { "content-type": result.type }); response.end(result.body);

@@ -90,6 +90,10 @@ def test_comparison_ranks_valid_tuned_candidates(tmp_path: Path):
             {"modelId": "large", "status": "complete", "artifactValid": True, "meanTokenOverlap": 0.7},
         ],
     }
+    for group in ("baseline_results", "evaluation_results"):
+        for result in state[group]:
+            result["evaluationIds"] = [3, 7]
+            result["qualityEvidence"] = {"metric":"label_accuracy", "score":result["meanTokenOverlap"], "coverage":1, "evaluatedExamples":2}
     comparison = _compare_results(state)
     assert comparison["winner"] == "large"
     assert comparison["evaluationIds"] == [3, 7]

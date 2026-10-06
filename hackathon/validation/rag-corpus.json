@@ -1,0 +1,50 @@
+[
+  {
+    "id": "ohio-agency",
+    "title": "Ohio Revised Code 1776.31: partner agency",
+    "url": "https://codes.ohio.gov/ohio-revised-code/section-1776.31",
+    "text": "A partner acts as an agent for the partnership business. Acts apparently within its ordinary business bind the partnership unless the partner lacked authority and the counterparty knew or had notice. Acts outside the ordinary business bind it only when authorized by the other partners. This section concerns partners, not every employee."
+  },
+  {
+    "id": "ohio-liability",
+    "title": "Ohio Revised Code 1776.36: partner liability",
+    "url": "https://codes.ohio.gov/ohio-revised-code/section-1776.36",
+    "text": "Subject to statutory exceptions or agreement with the claimant, partners are jointly and severally responsible for partnership obligations. A newly admitted partner is not personally liable for obligations predating admission. Obligations incurred while the business is a limited liability partnership generally belong to the partnership and do not create personal liability merely because someone is a partner."
+  },
+  {
+    "id": "aberdeen",
+    "title": "Aberdeen City Council: granite and the city",
+    "url": "https://committees.aberdeencity.gov.uk/documents/s4259/2.1%20background%20report.pdf",
+    "text": "Granite quarrying and granite construction shaped Aberdeen. Locally quarried stone was used extensively in the city, giving its architecture a distinctive character. Its granite-built streets and buildings explain the name Granite City."
+  },
+  {
+    "id": "oil",
+    "title": "EIA: formation of crude oil and petroleum",
+    "url": "https://www.eia.gov/energyexplained/oil-and-petroleum-products/in-depth.php",
+    "text": "Petroleum formation starts with ancient marine plants and animals dying. Their remains accumulated and were buried by sediment such as sand and silt. Over millions of years further burial, heat and pressure transformed this organic material into crude oil and natural gas."
+  },
+  {
+    "id": "friction",
+    "title": "OpenStax: friction between surfaces",
+    "url": "https://openstax.org/books/college-physics-2e/pages/5-1-friction",
+    "text": "Sliding friction depends on the coefficient of friction for the two materials and the normal force pressing the surfaces together. On a horizontal floor with no additional vertical forces, the normal force equals the object weight. Changing surface materials or object weight changes the horizontal force needed to slide it. Static friction limits the force needed to start motion."
+  },
+  {
+    "id": "winter",
+    "title": "UK Highway Code: driving in icy and snowy weather",
+    "url": "https://www.gov.uk/guidance/the-highway-code/driving-in-adverse-weather-conditions-226-to-237",
+    "text": "On icy roads, drive slowly and smoothly. Sudden steering, braking or acceleration can cause loss of control. Increase the gap to the vehicle ahead because stopping distances can be much longer. Brake gently and slow down before bends. Conditions can change over short distances."
+  },
+  {
+    "id": "gender",
+    "title": "WHO: gender identity and health",
+    "url": "https://www.who.int/news-room/questions-and-answers/item/gender-and-health",
+    "text": "Gender identity is an individual internal experience and may differ from sex assigned at birth. Gender expression, such as clothing and speech, does not necessarily reveal identity. Transgender describes people whose gender identity or expression differs from expectations associated with their assigned sex. Gender identity and sexual orientation are different concepts."
+  },
+  {
+    "id": "lcm",
+    "title": "Python math documentation: least common multiple",
+    "url": "https://docs.python.org/3/library/math.html#math.lcm",
+    "text": "The least common multiple of nonzero integers is the smallest positive integer divisible by all of them. Python math.lcm computes this value. If any supplied integer is zero, the least common multiple is zero."
+  }
+]

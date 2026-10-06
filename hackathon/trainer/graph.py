@@ -10,12 +10,15 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, TypedDict
 
+from benchmark import INSTRUCTION, MAX_TOKENS, select_model, apply_review, compass_results
+from evaluator import DEFAULT_MODEL, comparable_evidence, evaluate_results
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
@@ -26,12 +29,35 @@ from advisor import (
     evaluate_tuned_run,
     load_source,
     local_profile,
+    input_key,
+    privacy_scan,
     rank_candidates,
 )
 
 
 class WorkflowState(TypedDict, total=False):
     workflow_id: str
+    benchmark_selection: bool
+    quality_provenance: dict[str, Any] | None
+    model_benchmark: dict[str, Any]
+    benchmark_prices: dict[str, Any]
+    analysis_limit: int
+    task_description: str
+    success_metric: str
+    knowledge_documents: list[dict[str, Any]]
+    prompt_uses_rag: bool
+    selected_uses_rag: bool
+    analysis_only: bool
+    auto_analysis: bool
+    auto_trial_start: int
+    recommendation: dict[str, Any]
+    prompt_trials: list[dict[str, Any]]
+    prompt_action: str
+    prompt_instruction: str
+    selected_instruction: str
+    previous_workflow_id: str | None
+    data_review_action: str
+    clarification: dict[str, Any]
     dataset: dict[str, Any]
     test_dataset: dict[str, Any] | None
     goal: Literal["speed", "balanced", "quality"]
@@ -40,6 +66,9 @@ class WorkflowState(TypedDict, total=False):
     max_candidates: int
     max_retries: int
     profile: dict[str, Any]
+    privacy_review: dict[str, Any]
+    accuracy_review: dict[str, Any]
+    evaluator_model: str
     split_manifest_id: str
     split_manifest_path: str
     findings: list[dict[str, Any]]
@@ -60,6 +89,95 @@ class WorkflowState(TypedDict, total=False):
     blocker_resolution_action: str | None
 
 
+def accuracy_agent_review(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize available correctness evidence without inventing a score."""
+    models: dict[str, dict[str, Any]] = {}
+    counts = {r.get("modelId"): sum(x.get("modelId") == r.get("modelId") for x in results) for r in results}
+    for index, result in enumerate(results):
+        evidence = result.get("qualityEvidence") or {}
+        model_id = result.get("modelId")
+        score = evidence.get("score")
+        coverage = evidence.get("coverage")
+        examples = evidence.get("evaluatedExamples")
+        if result.get("status") != "complete" or not model_id:
+            continue
+        try:
+            measured = coverage == 1 and int(examples or 0) > 0 and type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 1
+        except (TypeError, ValueError):
+            measured = False
+        key = str(model_id) if counts[model_id] == 1 else f"{model_id}:{index}"
+        models[key] = {
+            "status": ("estimated" if evidence.get("estimated") else "measured") if measured else "needs_rubric",
+            "metric": evidence.get("metric"),
+            "score": float(score) if measured else None,
+            "evaluatedExamples": int(examples or 0),
+            "reviewExamples": evidence.get("reviewExamples", 0),
+        }
+    measured = [item for item in models.values() if item["status"] in {"measured", "estimated"}]
+    metric = measured[0]["metric"] if measured and all(item["metric"] == measured[0]["metric"] for item in measured) else None
+    if measured and len(measured) == len(models) and metric:
+        estimated = any(item["status"] == "estimated" for item in measured)
+        return {
+            "status": "estimated" if estimated else "measured",
+            "metric": metric,
+            "models": models,
+            "message": "Local judge estimates recorded. Review uncertain answers and calibrate against human grades before deployment." if estimated else "Correctness is measured against the recorded targets.",
+        }
+    if models:
+        return {
+            "status": "needs_rubric",
+            "metric": None,
+            "models": models,
+            "message": "Automatic rubric grading is incomplete. Check the judge status and review ambiguous examples; missing grades are not accuracy.",
+        }
+    return {
+        "status": "unavailable",
+        "metric": None,
+        "models": {},
+        "message": "No completed model answers were available for accuracy review.",
+    }
+
+
+
+def diagnose_trials(trials: list[dict[str, Any]]) -> dict[str, Any]:
+    # Compare only complete results for the same model and development examples.
+    baseline = {r.get("modelId"): r for r in trials[0]["results"] if r.get("status") == "complete"}
+    ranked = []
+    scored = []
+    for index, trial in enumerate(trials):
+        for result in trial["results"]:
+            base = baseline.get(result.get("modelId"))
+            if not base or result.get("status") != "complete" or trial.get("developmentIds") != trials[0].get("developmentIds"):
+                continue
+            if base.get('qualityReport') or result.get('qualityReport'):
+                from quality_training import quality_pair_compatible
+                if not quality_pair_compatible(base, result):
+                    continue
+            overlap = result.get("meanTokenOverlap")
+            base_overlap = base.get("meanTokenOverlap")
+            fmt, base_fmt = result.get("formatValidRate"), base.get("formatValidRate")
+            if base_fmt is not None and (fmt is None or fmt < base_fmt):
+                continue
+            quality, base_quality = _quality_value(result), _quality_value(base)
+            if quality is not None and base_quality is not None and comparable_evidence(result, base):
+                scored.append((quality - base_quality, index, result))
+            if overlap is not None and base_overlap is not None:
+                ranked.append((overlap - base_overlap, index, result))
+    ranked = scored or ranked
+    best = max(ranked, key=lambda item: (item[0], -item[1])) if ranked else None
+    selected = best[1] if best else 0
+    improved = bool(best and best[0] >= .05 and selected != 0)
+    # Token overlap is a diagnostic, never a reliable measure of factual correctness.
+    format_failures = sum(1 for sample in (best[2].get("samples", []) if best else []) if not str(sample.get("baseOutput", "")).strip())
+    structured_failure = bool(best and best[2].get("formatValidRate") is not None and (1 - best[2]["formatValidRate"]) * len(best[2].get("samples", [])) >= 3)
+    return {
+        "title": "Try the improved prompt first" if improved and scored else "Review the automatically tested prompt" if improved else "Consider a small fine-tune pilot" if structured_failure or format_failures >= 3 else "More evidence needed before choosing RAG or fine-tuning",
+        "reason": "An automatic prompt increased the recorded correctness score without reducing measured format validity. Model-judged scores are estimates; validate on unseen examples before adopting it." if improved and scored else "The selected prompt increased word overlap, but factual correctness is unmeasured. Review its answers against a task rubric before choosing it." if improved else "Repeated output-format or empty-answer failures remain after automatic prompt trials. A small fine-tune is a candidate, not a proven solution." if structured_failure or format_failures >= 3 else "These trials do not establish a reliable behavioral improvement or prove that knowledge is missing. Token overlap alone cannot distinguish factual errors from valid alternative answers.",
+        "rag": "Tested against the connected references. Inspect retrieved sources and actual answers; retrieval coverage and word overlap do not prove correctness." if any(t.get("usesRag") for t in trials) else "Not tested: no independent knowledge source is connected. Supply relevant documents to test retrieval; reference answers must not be used as retrieved context for their own evaluation questions.",
+        "selectedTrial": selected,
+        "confidence": "provisional",
+    }
+
 @dataclass
 class WorkflowServices:
     """Side effects supplied by the FastAPI application.
@@ -73,6 +191,16 @@ class WorkflowServices:
     submit_training: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
     get_training: Callable[[str], Awaitable[dict[str, Any]]]
     training_dir: Callable[[str], Path]
+    gpu_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    isolate_inference: bool = False
+
+
+def isolated_inference(function, *args, **kwargs):
+    # A process boundary releases CUDA contexts as well as tensors after evaluation.
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        return pool.submit(function, *args, **kwargs).result()
 
 
 def _dataset_key(dataset: dict[str, Any]) -> str:
@@ -161,22 +289,33 @@ def _make_split_manifest(state: WorkflowState, services: WorkflowServices, datas
     schema = profile.get("facts", {}).get("schema")
     train_indices = _valid_indices(dataset, schema)
     test_ref = state.get("test_dataset")
+    # ponytail: exact normalized-input groups; semantic near-duplicate detection needs a separate audit.
+    groups = {}
+    for index in train_indices:
+        groups.setdefault(input_key(dataset[index]), []).append(index)
+    shuffled = list(groups.values())
+    random.Random(seed).shuffle(shuffled)
 
     if test_ref:
         eval_dataset = load_source(test_ref["source"], test_ref["name"], test_ref.get("extension"))
         eval_indices = _valid_indices(eval_dataset, schema)
+        if any(input_key(eval_dataset[i]) in groups for i in eval_indices):
+            raise ValueError("Training and external test inputs overlap. Supply an independent test dataset.")
         train_ref = state["dataset"]
         eval_ref = test_ref
     else:
-        shuffled = list(train_indices)
-        random.Random(seed).shuffle(shuffled)
         eval_count = max(1, round(len(shuffled) * 0.1)) if shuffled else 0
-        eval_indices = sorted(shuffled[:eval_count])
-        train_indices = sorted(shuffled[eval_count:])
+        eval_indices = sorted(i for group in shuffled[:eval_count] for i in group)
+        shuffled = shuffled[eval_count:]
         train_ref = state["dataset"]
         eval_ref = state["dataset"]
 
+    dev_count = max(1, len(shuffled) // 10) if shuffled else 0
+    dev_indices = [i for group in shuffled[:dev_count] for i in group]
+    train_indices = sorted(i for group in shuffled[dev_count:] for i in group)
+    evaluation_ids = random.Random(seed + 2).sample(eval_indices, min(len(eval_indices), state.get("analysis_limit", 50)))
     payload = {
+        "developmentIndices": dev_indices,
         "workflowId": state["workflow_id"],
         "seed": seed,
         "schema": schema,
@@ -185,7 +324,9 @@ def _make_split_manifest(state: WorkflowState, services: WorkflowServices, datas
         "evalDataset": eval_ref,
         "trainIndices": train_indices,
         "evalIndices": eval_indices,
-        "evaluationIds": eval_indices[:100],
+        "evaluationIds": evaluation_ids,
+        "leakageCheck": {"method": "normalized exact input grouping", "inputGroups": len(groups), "duplicateInputRows": sum(len(g) - 1 for g in groups.values())},
+        "warnings": (["Fewer than 30 development or final examples: exploratory results, not reliable model-selection evidence."] if min(len(dev_indices), len(evaluation_ids)) < 30 else []),
     }
     path = workflow_dir / "split.json"
     _persist_json(path, payload)
@@ -219,11 +360,15 @@ def _default_hyperparameters(profile: dict[str, Any]) -> dict[str, Any]:
 def _base_plan(state: WorkflowState) -> dict[str, Any]:
     plan_candidates = []
     for item in state.get("candidates", [])[: int(state.get("max_candidates", 3))]:
+        hyperparameters = _default_hyperparameters(state["profile"])
+        # ponytail: 7B activations exceed a 15 GB T4 at long context; raise the cap when larger GPUs are supported.
+        if int(item.get("model", {}).get("sizeB", 0) or 0) >= 7:
+            hyperparameters["max_sequence_length"] = min(hyperparameters["max_sequence_length"], 1024)
         plan_candidates.append(
             {
                 "model": item["model"],
                 "method": item["method"],
-                "hyperparameters": _default_hyperparameters(state["profile"]),
+                "hyperparameters": hyperparameters,
                 "estimatedVramGb": item.get("estimatedVramGb"),
                 "estimatedDuration": item.get("estimatedDuration"),
                 "score": item.get("score"),
@@ -269,14 +414,14 @@ def _metric_value(result: dict[str, Any], name: str, default: float | None = Non
 
 
 def _quality_value(result: dict[str, Any]) -> float | None:
-    overlap = _metric_value(result, "meanTokenOverlap")
-    if overlap is not None:
-        return overlap
-    format_rate = _metric_value(result, "formatValidRate")
-    if format_rate is not None:
-        return format_rate
-    loss = _metric_value(result, "eval_loss")
-    return -loss if loss is not None else None
+    evidence = result.get("qualityEvidence", {})
+    if evidence.get("coverage") != 1 or not evidence.get("evaluatedExamples"):
+        return None
+    ids = result.get("evaluationIds", [])
+    if ids and evidence["evaluatedExamples"] != len(ids):
+        return None
+    value = _metric_value(evidence, "score")
+    return value if value is not None and 0 <= value <= 1 else None
 
 
 def _compare_results(state: WorkflowState) -> dict[str, Any]:
@@ -295,12 +440,21 @@ def _compare_results(state: WorkflowState) -> dict[str, Any]:
         tuned_loss = _metric_value(result, "eval_loss")
         base_latency = _metric_value(base, "latencySeconds")
         tuned_latency = _metric_value(result, "latencySeconds")
+        base_quality, tuned_quality = _quality_value(base), _quality_value(result)
+        same_metric = comparable_evidence(base, result)
+        if state.get('quality_provenance') or base.get('qualityReport') or result.get('qualityReport'):
+            from quality_training import quality_pair_compatible
+            same_metric = same_metric and quality_pair_compatible(base, result)
+        same_examples = bool(base.get("evaluationIds")) and base.get("evaluationIds") == result.get("evaluationIds")
+        quality_delta = tuned_quality - base_quality if same_metric and same_examples and base_quality is not None and tuned_quality is not None else None
         overlap_delta = tuned_overlap - base_overlap if tuned_overlap is not None and base_overlap is not None else None
         pairs.append(
             {
                 "modelId": model_id,
                 "base": base,
                 "tuned": result,
+                "qualityScoreDelta": round(quality_delta, 4) if quality_delta is not None else None,
+                "qualityMetric": base.get("qualityEvidence", {}).get("metric") if quality_delta is not None else None,
                 "meanTokenOverlapDelta": round(overlap_delta, 4) if overlap_delta is not None else None,
                 "formatValidRateDelta": round(tuned_format - base_format, 4) if tuned_format is not None and base_format is not None else None,
                 "evalLossDelta": round(tuned_loss - base_loss, 4) if tuned_loss is not None and base_loss is not None else None,
@@ -310,7 +464,9 @@ def _compare_results(state: WorkflowState) -> dict[str, Any]:
         )
 
     goal = state.get("goal", "balanced")
-    valid = [item for item in pairs if item["passed"]]
+    # Correctness scores must cover the same held-out examples; overlap is diagnostic only.
+    comparable = [item for item in pairs if item["passed"] and item["base"].get("status") == "complete" and item["qualityScoreDelta"] is not None]
+    valid = [item for item in comparable if item["qualityScoreDelta"] >= 0.05 and (item["formatValidRateDelta"] is None or item["formatValidRateDelta"] >= 0)]
 
     def rank_key(item: dict[str, Any]) -> tuple[float, float, float]:
         tuned_result = item["tuned"]
@@ -325,18 +481,43 @@ def _compare_results(state: WorkflowState) -> dict[str, Any]:
         return (-quality + (latency / 1000), latency, vram)
 
     leaderboard = sorted(valid, key=rank_key)
+    manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
     return {
         "goal": goal,
         "pairs": pairs,
         "leaderboard": leaderboard,
         "winner": leaderboard[0]["modelId"] if leaderboard else None,
-        "evaluationIds": json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8")).get("evaluationIds", []),
+        "decision": "review_fine_tune" if leaderboard else "keep_baseline" if comparable else "review_required",
+        "decisionReason": "At least 5 percentage points of correctness-score improvement on the same held-out examples, using the same evaluator with full grading coverage and no measured format regression, are required for review. Local model grades are estimates requiring human calibration. This is not deployment approval.",
+        "evaluationIds": manifest.get("evaluationIds", manifest.get("evalIndices", [])[:100]),
+        "accuracyReview": state.get("accuracy_review"),
+        "privacyReview": state.get("privacy_review"),
         "completedAt": time.time(),
     }
 
 
 def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
     """Build and compile the resumable ForgeTune graph."""
+
+    async def run_inference(function, *args, **kwargs):
+        from quality_training import bounded_comparison
+        if function is baseline_compare and any(c.get('model', {}).get('localPath') for c in args[1]):
+            indices = kwargs.get('eval_indices', list(range(min(len(args[0]), args[2]))))
+            return [await asyncio.to_thread(bounded_comparison, services.data_root, args[0], indices, kwargs.get('task'), kwargs.get('instruction', ''), knowledge_documents=kwargs.get('knowledge_documents'), revision=c['model'].get('revision'), policy=c.get('qualityPolicy')) for c in args[1]]
+        if function is evaluate_tuned_run and args[1].get('model', {}).get('localPath'):
+            return await asyncio.to_thread(bounded_comparison, services.data_root, args[0], args[3], kwargs.get('task'), kwargs.get('instruction', ''), Path(args[2]) / 'adapter', kwargs.get('knowledge_documents'), revision=args[1]['model'].get('revision'), policy=args[1].get('qualityPolicy'))
+        if services.isolate_inference:
+            return await asyncio.to_thread(isolated_inference, function, *args, **kwargs)
+        return await asyncio.to_thread(function, *args, **kwargs)
+
+    async def grade_results(state, dataset, results, instruction="", knowledge_documents=None):
+        if state.get('quality_provenance'):
+            return results  # Bounded quality inference records separate deterministic scores; no implicit judge.
+        async with services.gpu_lock:
+            return await run_inference(evaluate_results, dataset, results,
+                task=state.get("profile", {}).get("classification", {}).get("task", "assistant"),
+                model_id=state.get("evaluator_model", DEFAULT_MODEL), instruction=instruction,
+                knowledge_documents=knowledge_documents)
 
     async def initialize(state: WorkflowState) -> dict[str, Any]:
         return {
@@ -349,11 +530,12 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             "max_candidates": min(3, int(state.get("max_candidates", 3))),
             "max_retries": min(2, int(state.get("max_retries", 2))),
             "split_seed": int(state.get("split_seed", 42)),
+            "evaluator_model": state.get("evaluator_model") or os.environ.get("EVALUATOR_MODEL") or DEFAULT_MODEL,
         }
 
     async def load_and_normalize(state: WorkflowState) -> dict[str, Any]:
         dataset_ref = state["dataset"]
-        dataset = load_source(dataset_ref["source"], dataset_ref["name"], dataset_ref.get("extension"))
+        dataset = await asyncio.to_thread(load_source, dataset_ref["source"], dataset_ref["name"], dataset_ref.get("extension"))
         columns = list(dataset.column_names)
         sample = [_content(dataset[index])[:1000] for index in range(min(100, len(dataset)))]
         fingerprint = hashlib.sha256((_dataset_key(dataset_ref) + json.dumps(sample, ensure_ascii=False)).encode()).hexdigest()
@@ -363,9 +545,9 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
 
     async def profile_and_split(state: WorkflowState) -> dict[str, Any]:
         dataset_ref = state["dataset"]
-        dataset = load_source(dataset_ref["source"], dataset_ref["name"], dataset_ref.get("extension"))
-        profile = local_profile(dataset)
-        manifest = _make_split_manifest(state, services, dataset, profile)
+        dataset = await asyncio.to_thread(load_source, dataset_ref["source"], dataset_ref["name"], dataset_ref.get("extension"))
+        profile = await asyncio.to_thread(local_profile, dataset)
+        manifest = await asyncio.to_thread(_make_split_manifest, state, services, dataset, profile)
         return {
             "profile": profile,
             "findings": profile.get("findings", []),
@@ -374,16 +556,25 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             "status": "planning",
         }
 
+    async def privacy_scanner(state: WorkflowState) -> dict[str, Any]:
+        dataset_ref = state["dataset"]
+        dataset = await asyncio.to_thread(load_source, dataset_ref["source"], dataset_ref["name"], dataset_ref.get("extension"))
+        indices = sorted(random.Random(42).sample(range(len(dataset)), min(600, len(dataset))))
+        review = privacy_scan(list(dataset.select(indices)))
+        review["flaggedRows"] = [indices[i] for i in review["flaggedRows"]]
+        return {"privacy_review": review}
+
     def route_after_profile(state: WorkflowState) -> str:
         blockers = [item for item in state.get("findings", []) if item.get("severity") == "blocker"]
         confidence = float(state.get("profile", {}).get("classification", {}).get("confidence", 0))
         if blockers:
             return "assess_blockers"
-        if confidence < 0.8 and state.get("cloud_assist"):
+        uncertain = confidence < 0.8 or any(item.get("code") == "uncertain_task" for item in state.get("findings", []))
+        if uncertain and state.get("cloud_assist"):
             return "clarify_data"
-        if confidence < 0.8:
+        if uncertain:
             return "human_data_review"
-        return "build_candidates"
+        return "dataset_ready" if state.get("analysis_only") else "build_candidates"
 
     async def assess_blockers(state: WorkflowState) -> dict[str, Any]:
         blockers = [item for item in state.get("findings", []) if item.get("severity") == "blocker"]
@@ -440,37 +631,41 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         return "apply_blocker_remediation"
 
     async def human_data_review(state: WorkflowState) -> dict[str, Any]:
-        response = interrupt(
-            {
+        validation_error = None
+        while True:
+            response = interrupt({
                 "type": "data_review",
-                "message": "Review the dataset findings before model selection.",
-                "profile": state.get("profile", {}),
-                "findings": state.get("findings", []),
+                "message": validation_error or "The intended task is ambiguous. What should a model learn from these examples?",
+                "profile": state.get("profile", {}), "findings": state.get("findings", []),
                 "actions": ["replace_dataset", "accept_classification", "abort"],
-            }
-        )
-        if not isinstance(response, dict):
-            raise ValueError("Data review response must be an object.")
-        action = response.get("action")
-        if action == "abort":
-            return {"status": "blocked", "pending_action": None, "errors": ["Workflow aborted during data review."]}
-        if action == "replace_dataset":
-            dataset = response.get("dataset")
-            if not isinstance(dataset, dict) or not dataset.get("source") or not dataset.get("name"):
-                raise ValueError("replace_dataset requires a dataset source and name.")
-            return {"dataset": dataset, "pending_action": None, "status": "profiling", "data_review_action": "replace_dataset"}
-        if action == "accept_classification" and state.get("profile", {}).get("classification"):
+            })
+            if not isinstance(response, dict):
+                validation_error = "Choose a task and describe the intended result."
+                continue
+            action = response.get("action")
+            if action == "abort":
+                return {"status": "blocked", "pending_action": None}
+            if action == "replace_dataset":
+                dataset = response.get("dataset")
+                if not isinstance(dataset, dict) or not dataset.get("source") or not dataset.get("name"):
+                    validation_error = "A replacement dataset source and name are required."
+                    continue
+                return {"dataset": dataset, "clarification": {}, "pending_action": None, "status": "profiling", "data_review_action": "replace_dataset"}
+            task, notes = response.get("task"), response.get("notes", "")
+            if action != "accept_classification" or not isinstance(task, str) or task not in {"assistant", "writing", "code", "structured", "classification"} or not isinstance(notes, str) or not notes.strip() or len(notes) > 2000:
+                validation_error = "Select a task and provide a short explanation (1–2000 characters)."
+                continue
             if any(item.get("severity") == "blocker" for item in state.get("findings", [])):
-                raise ValueError("Blocker findings must be resolved before accepting the classification.")
-            return {"pending_action": None, "status": "planning", "data_review_action": "accept_classification"}
-        raise ValueError("Unsupported data review action.")
+                raise ValueError("Dataset blockers must be resolved first.")
+            profile = {**state["profile"], "classification": {"task": task, "confidence": 1.0, "source": "user-confirmed", "explanation": notes.strip()}}
+            return {"profile": profile, "clarification": {"task": task, "notes": notes.strip()}, "pending_action": None, "status": "planning", "data_review_action": "accept_classification"}
 
     def route_after_data_review(state: WorkflowState) -> str:
         if state.get("status") == "blocked":
             return "finish_blocked"
         if state.get("data_review_action") == "replace_dataset":
             return "load_and_normalize"
-        return "build_candidates"
+        return "dataset_ready" if state.get("analysis_only") else "build_candidates"
 
     async def clarify_data(state: WorkflowState) -> dict[str, Any]:
         profile = state["profile"]
@@ -493,28 +688,207 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         return {"profile": updated, "status": "planning"}
 
     def route_after_clarification(state: WorkflowState) -> str:
-        confidence = float(state.get("profile", {}).get("classification", {}).get("confidence", 0))
-        return "build_candidates" if confidence >= 0.8 else "human_data_review"
+        # An agent suggestion does not replace user confirmation of ambiguous intent.
+        return "human_data_review"
+
+    async def dataset_ready(state: WorkflowState) -> dict[str, Any]:
+        if state.get("auto_analysis"):
+            return {"analysis_only": False, "status": "planning"}
+        while True:
+            response = interrupt({"type": "dataset_ready", "message": "Dataset analysis is complete. Review the findings before starting model evaluation.", "profile": state.get("profile", {}), "actions": ["continue_training", "abort"]})
+            if isinstance(response, dict) and response.get("action") == "abort":
+                return {"status": "cancelled", "pending_action": None}
+            if isinstance(response, dict) and response.get("action") == "continue_training":
+                return {"analysis_only": False, "auto_analysis": True, "status": "planning", "pending_action": None}
 
     async def build_candidates(state: WorkflowState) -> dict[str, Any]:
-        memory = services.gpu_memory_gb() or 24
+        # Persisted workflows predating task briefs retain their existing decisions.
+        brief = {key: state.get(key, "") for key in ("task_description", "success_metric")}
+        limit = state.get("analysis_limit", 50)
+        while "task_description" in state and not all(isinstance(v, str) and 1 <= len(v.strip()) <= 2000 for v in brief.values()):
+            response = interrupt({"type": "task_review", "message": "Define the intended task and how success will be measured before comparing models.", "analysisLimit": limit})
+            if not isinstance(response, dict):
+                continue
+            if response.get("action") == "abort":
+                return {"status": "cancelled", "candidates": [], "pending_action": None}
+            brief = {key: response.get(key, "") for key in brief}
+            chosen = response.get("analysis_limit", limit)
+            if type(chosen) is not int or not 1 <= chosen <= 200:
+                brief = {key: "" for key in brief}
+                continue
+            limit = chosen
+        if "task_description" in state:
+            manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
+            manifest["evaluationIds"] = random.Random(state.get("split_seed", 42) + 2).sample(manifest["evalIndices"], min(len(manifest["evalIndices"]), limit))
+            _persist_json(Path(state["split_manifest_path"]), manifest)
+        memory = services.gpu_memory_gb()
+        if state.get('quality_provenance'):
+            from quality_training import pilot_candidate
+            try:
+                from quality_training import dataset_provenance
+                if dataset_provenance(services.data_root, state['dataset']) != state['quality_provenance']:
+                    raise ValueError('Dataset changed after quality review. Audit the new dataset and create an approved version before model experiments.')
+                candidate = pilot_candidate(memory)
+                candidate['qualityPolicy'] = state['quality_provenance']['policy']
+            except ValueError as error:
+                return {'candidates': [], 'status': 'blocked', 'errors': [str(error)]}
+            return {**({key: value.strip() for key, value in brief.items()} if 'task_description' in state else {}), 'analysis_limit': limit, 'candidates': [candidate], 'status': 'baseline'}
         ranked = rank_candidates(state["profile"], state.get("goal", "balanced"), memory)
         eligible = [item for item in ranked if not item.get("rejected")]
         if not eligible:
             return {"candidates": [], "status": "blocked", "errors": ["No model is feasible for the available GPU memory."]}
-        return {"candidates": eligible[: int(state.get("max_candidates", 3))], "status": "baseline"}
+        return {**({key: value.strip() for key, value in brief.items()} if "task_description" in state else {}), "analysis_limit": limit, "candidates": eligible if state.get("benchmark_selection") else eligible[: int(state.get("max_candidates", 3))], "status": "benchmarking" if state.get("benchmark_selection") else "baseline"}
+
+    async def benchmark_models(state: WorkflowState) -> dict[str, Any]:
+        ref=state["dataset"]
+        dataset=load_source(ref["source"],ref["name"],ref.get("extension"))
+        manifest=json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
+        ids=manifest.get("developmentIndices",[])[:state.get("analysis_limit",50)]
+        results=[]
+        if not ids:
+            return {"status":"blocked","errors":["No development questions are available for model selection."]}
+        async with services.gpu_lock:
+            for candidate in state["candidates"]:
+                try:
+                    records=await run_inference(baseline_compare,dataset,[candidate],len(ids),eval_indices=ids,task=state["profile"]["classification"]["task"],instruction=INSTRUCTION,max_new_tokens=MAX_TOKENS,strict_context=True)
+                    record=records[0]
+                except Exception as error:
+                    record={"status":"unavailable","message":str(error)[:300]}
+                results.append({**record,"modelId":candidate["model"]["id"],"provider":"local"})
+        results = await grade_results(state, dataset, results, INSTRUCTION)
+        results,prices=apply_review(results,{},state.get("benchmark_prices",{}))
+        summary=select_model(results,ids)
+        summary["accuracyReview"] = accuracy_agent_review(results)
+        return {"model_benchmark":{**summary,"splitManifestId":state["split_manifest_id"],"instruction":INSTRUCTION,"maxOutputTokens":MAX_TOKENS,"prices":prices},"status":"awaiting_model_selection"}
+
+    async def model_selection(state: WorkflowState) -> dict[str, Any]:
+        benchmark=state["model_benchmark"]
+        winner=benchmark.get("winner")
+        if winner:
+            selected=next(r for r in benchmark["results"] if r["modelId"]==winner)
+            if selected["provider"]=="compass":
+                return {"status":"complete","comparison":{"decision":"keep_baseline","pairs":[],"modelIds":[winner],"instruction":INSTRUCTION,"decisionReason":"The development benchmark selected a hosted Compass model. This model is retained as the baseline; local fine-tuning is not applicable. Validate it on untouched final questions before deployment."}}
+            return {"candidates":[c for c in state["candidates"] if c["model"]["id"]==winner],"status":"baseline"}
+        response=interrupt({"type":"model_selection","message":benchmark.get("error") or benchmark["reason"],"benchmark":benchmark,"actions":["select_best","add_compass","abort"]})
+        if not isinstance(response,dict):
+            return {"model_benchmark":{**benchmark,"error":"Review the model benchmark."}}
+        if response.get("action")=="abort": return {"status":"cancelled"}
+        try:
+            results=benchmark["results"]
+            if response.get("action")=="add_compass":
+                ref=state["dataset"];dataset=load_source(ref["source"],ref["name"],ref.get("extension"))
+                rows=[dataset[i] for i in benchmark["developmentIds"]]
+                added=compass_results(response.get("job"),benchmark,rows)
+                added = await grade_results(state, dataset, added, INSTRUCTION)
+                if any(r["provider"]=="local" and r["modelId"] in {a["modelId"] for a in added} for r in results):
+                    raise ValueError("Hosted model IDs must differ from local benchmark IDs.")
+                results=[r for r in results if r["modelId"] not in {a["modelId"] for a in added}]+added
+                if len(results)>7: raise ValueError("This pilot supports five local models and two Compass models.")
+            elif response.get("action")!="select_best": raise ValueError("Choose a benchmark action.")
+            results,prices=apply_review(results,response,benchmark.get("prices",{}))
+            summary=select_model(results,benchmark["developmentIds"],response.get("allowUnknownCost") is True)
+            summary["accuracyReview"] = accuracy_agent_review(results)
+            return {"model_benchmark":{**benchmark,**summary,"prices":prices,"error":None},"status":"awaiting_model_selection"}
+        except (ValueError,TypeError,KeyError) as error:
+            return {"model_benchmark":{**benchmark,"error":str(error)[:400]}}
 
     async def baseline_evaluate(state: WorkflowState) -> dict[str, Any]:
-        dataset_ref = state.get("test_dataset") or state["dataset"]
+        dataset_ref = state["dataset"]
         dataset = load_source(dataset_ref["source"], dataset_ref["name"], dataset_ref.get("extension"))
         manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
         candidates = state.get("candidates", [])[: int(state.get("max_candidates", 3))]
-        limit = min(100, max(20, len(manifest.get("evalIndices", []))))
+        indices = manifest.get("developmentIndices", manifest.get("trainIndices", [])[:10])[:state.get("analysis_limit", 10)]
+        instruction = state.get("prompt_instruction", "")
         try:
-            comparisons = baseline_compare(dataset, candidates, limit, eval_indices=manifest.get("evalIndices", []), task=state.get("profile", {}).get("classification", {}).get("task"))
+            async with services.gpu_lock:
+                comparisons = await run_inference(baseline_compare, dataset, candidates, len(indices), eval_indices=indices, task=state.get("profile", {}).get("classification", {}).get("task"), instruction=instruction, knowledge_documents=state.get("knowledge_documents") if state.get("prompt_uses_rag") else None)
         except Exception as error:
             comparisons = [{"status": "unavailable", "message": str(error)[:300]}]
-        return {"baseline_results": comparisons, "status": "awaiting_plan"}
+        comparisons = await grade_results(state, dataset, comparisons, instruction, state.get("knowledge_documents") if state.get("prompt_uses_rag") else None)
+        trials = state.get("prompt_trials", []) + [{"instruction": instruction, "usesRag": bool(state.get("prompt_uses_rag")), "knowledgeDocuments": state.get("knowledge_documents", []) if state.get("prompt_uses_rag") else [], "results": comparisons, "developmentIds": indices}]
+        return {"baseline_results": comparisons, "prompt_trials": trials, "accuracy_review": accuracy_agent_review(comparisons), "status": "awaiting_prompt_review"}
+
+    async def accuracy_reviewer(state: WorkflowState) -> dict[str, Any]:
+        return {"accuracy_review": accuracy_agent_review(state.get("baseline_results", []))}
+
+    async def automatic_analysis(state: WorkflowState) -> dict[str, Any]:
+        trials = list(state.get("prompt_trials", []))
+        completed = [r for r in trials[-1]["results"] if r.get("status") == "complete"] if trials else []
+        if not completed:
+            return {"recommendation": {"title": "Model evaluation unavailable", "reason": "The local inference runtime could not run the baseline. No prompt, RAG, or fine-tuning conclusion is supported yet. Retry automatic analysis after connecting a working runtime.", "rag": "Not tested: no independent knowledge source is connected.", "selectedTrial": None}, "status": "awaiting_prompt_review"}
+        task = state.get("profile", {}).get("classification", {}).get("task", "instruction")
+        rules = {
+            "structured": "Return only valid JSON. Do not add Markdown fences or commentary. Follow the requested schema exactly.",
+            "classification": "Return only the requested label. Use only the labels allowed by the task.",
+            "code": "Return correct code for the requested language and constraints. Handle the stated edge cases. Do not invent APIs.",
+            "writing": "Follow the requested tone, length, and structure. Preserve the supplied facts.",
+            "summarization": "Summarize the supplied material faithfully. Preserve essential facts and do not introduce unsupported claims.",
+        }
+        instruction = rules.get(task, "Follow the user's task and requested output format exactly. Give a direct, concise answer and do not invent missing facts.")
+        # ponytail: two local prompt strategies; replace with a learned optimizer when reliable task-specific scoring exists.
+        for prompt in [instruction, instruction + " Check your answer for missing requirements and contradictions before returning the final answer. If the supplied information is insufficient, state what is missing."]:
+            result = await baseline_evaluate({**state, "prompt_trials": trials, "prompt_instruction": prompt, "prompt_uses_rag": False})
+            trials = result["prompt_trials"]
+        if state.get("knowledge_documents"):
+            result = await baseline_evaluate({**state, "prompt_trials":trials, "prompt_instruction":instruction, "prompt_uses_rag":True})
+            trials = result["prompt_trials"]
+        start = state.get("auto_trial_start", 0)
+        recommendation = diagnose_trials(trials[start:])
+        recommendation["selectedTrial"] += start
+        latest_results = trials[-1].get("results", []) if trials else []
+        return {"prompt_trials": trials, "accuracy_review": accuracy_agent_review(latest_results), "recommendation": recommendation, "status": "awaiting_prompt_review"}
+
+    async def prompt_review(state: WorkflowState) -> dict[str, Any]:
+        error = None
+        trials = state.get("prompt_trials", [])
+        while True:
+            response = interrupt({"type":"prompt_review", "message":error or "Compare prompts on examples prepared from this dataset. Choose the best configuration before deciding whether to fine-tune.", "trials":trials, "recommendation":state.get("recommendation"), "actions":["auto_analyze", "test_rag", "try_prompt", "keep_baseline", "fine_tune", "abort"]})
+            if not isinstance(response, dict):
+                error = "Choose a prompt-review action."
+                continue
+            action = response.get("action")
+            if action == "abort":
+                return {"status":"cancelled", "prompt_action":"abort"}
+            if action == "auto_analyze":
+                return {"auto_analysis":True, "prompt_uses_rag":False, "prompt_instruction":"", "auto_trial_start":len(trials), "prompt_action":"auto_analyze", "status":"baseline", "recommendation":{}}
+            if action == "test_rag":
+                from quality_probe import validate_documents
+                try:
+                    documents = validate_documents(response.get("documents"))
+                except ValueError as invalid:
+                    error = str(invalid)
+                    continue
+                return {"knowledge_documents":documents, "prompt_uses_rag":False, "auto_analysis":True, "prompt_uses_rag":False, "prompt_instruction":"", "auto_trial_start":len(trials), "prompt_action":"auto_analyze", "status":"baseline"}
+            if action == "try_prompt":
+                instruction, context = response.get("instruction", ""), response.get("context", "")
+                if not isinstance(instruction, str) or not isinstance(context, str) or len(instruction) > 4000 or len(context) > 8000:
+                    error = "Use instructions up to 4000 characters and context up to 8000 characters."
+                    continue
+                if len(trials) >= 10:
+                    error = "This workflow has reached its 10 prompt trials. Choose a result or start a new dataset version."
+                    continue
+                combined = instruction + ("\n\nReference context:\n" + context if context.strip() else "")
+                return {"auto_analysis":False, "recommendation":{}, "prompt_instruction":combined, "prompt_uses_rag":False, "prompt_action":"try_prompt", "status":"baseline"}
+            index = response.get("trial_index", state.get("recommendation", {}).get("selectedTrial"))
+            if action not in {"keep_baseline", "fine_tune"} or not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(trials):
+                error = "Select a recorded prompt version to review."
+                continue
+            selected = trials[index]
+            if selected.get("usesRag") and "knowledgeDocuments" not in selected:
+                error = "This older RAG trial has no saved references. Test the references again before selecting it."
+                continue
+            results = [item for item in selected["results"] if item.get("status") == "complete"]
+            if not results:
+                error = "This trial has no completed inference. Retry when the local model runtime is available."
+                continue
+            update = {"selected_instruction":selected["instruction"], "selected_uses_rag":bool(selected.get("usesRag")), "baseline_results":results, "prompt_action":action, "pending_action":None}
+            if selected.get("usesRag"):
+                update["knowledge_documents"] = selected["knowledgeDocuments"]
+            if action == "keep_baseline":
+                update.update({"status":"complete", "comparison":{"decision":"keep_baseline", "selectedTrial":index, "instruction":selected["instruction"], "modelIds":[item["modelId"] for item in results], "pairs":[], "decisionReason":"You reviewed the dataset examples and chose to keep this untuned configuration."}})
+            else:
+                update.update({"status":"awaiting_plan", "candidates":[item for item in state.get("candidates", []) if any(result.get("modelId") == item["model"]["id"] for result in results)]})
+            return update
 
     async def select_and_approve_plan(state: WorkflowState) -> dict[str, Any]:
         proposed = _base_plan(state)
@@ -535,7 +909,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             if response.get("action") == "abort":
                 return {"status": "cancelled", "pending_action": None}
             plan = response.get("plan") if response.get("action") == "edit" else proposed
-            valid, reason = _validate_plan(plan, services.gpu_memory_gb() or 24)
+            valid, reason = _validate_plan(plan, services.gpu_memory_gb())
             if not valid:
                 validation_error = reason or "Invalid training plan."
                 proposed = plan if isinstance(plan, dict) else proposed
@@ -570,6 +944,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                 "dataset": state["dataset"],
                 "testDataset": state.get("test_dataset"),
                 "baseModel": key,
+                "baseModelRevision": candidate['model'].get('revision'),
                 "parameterMethod": candidate["method"],
                 "hyperparameters": hp,
                 "splitManifestId": state["split_manifest_id"],
@@ -637,22 +1012,19 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         metrics: dict[str, Any] = {}
         if metrics_path.exists():
             metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        baseline = next((item for item in state.get("baseline_results", []) if item.get("modelId") == key), {})
+        baseline = {"modelId": key, "status": "unavailable"}
         manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
-        eval_indices = manifest.get("evalIndices", [])[:100]
+        eval_indices = manifest.get("evaluationIds", manifest.get("evalIndices", [])[:100])
         try:
             eval_dataset = None
             if state.get("test_dataset"):
                 test_ref = state["test_dataset"]
                 eval_dataset = load_source(test_ref["source"], test_ref["name"], test_ref.get("extension"))
-            generated = evaluate_tuned_run(
-                load_source(state["dataset"]["source"], state["dataset"]["name"], state["dataset"].get("extension")),
-                candidate,
-                services.training_dir(run_id),
-                eval_indices,
-                test_dataset=eval_dataset,
-                task=state.get("profile", {}).get("classification", {}).get("task"),
-            )
+            final_dataset = eval_dataset if eval_dataset is not None else load_source(state["dataset"]["source"], state["dataset"]["name"], state["dataset"].get("extension"))
+            async with services.gpu_lock:
+                final_baselines = await run_inference(baseline_compare, final_dataset, [candidate], len(eval_indices), eval_indices=eval_indices, task=state.get("profile", {}).get("classification", {}).get("task"), instruction=state.get("selected_instruction", ""), knowledge_documents=state.get("knowledge_documents") if state.get("selected_uses_rag") else None)
+                baseline = final_baselines[0]
+                generated = await run_inference(evaluate_tuned_run, final_dataset, candidate, services.training_dir(run_id), eval_indices, task=state.get("profile", {}).get("classification", {}).get("task"), instruction=state.get("selected_instruction", ""), knowledge_documents=state.get("knowledge_documents") if state.get("selected_uses_rag") else None)
         except Exception as error:
             generated = {"status": "unavailable", "message": str(error)[:300], "modelId": key}
         tuned_overlap = _metric_value(generated, "meanTokenOverlap")
@@ -661,10 +1033,10 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         base_format = _metric_value(baseline, "formatValidRate")
         tuned_loss = _metric_value(generated, "eval_loss") or _metric_value(metrics, "eval_loss")
         base_loss = _metric_value(baseline, "eval_loss")
+        tuned_quality, base_quality = _quality_value(generated), _quality_value(baseline)
         quality_regression = bool(
-            (tuned_overlap is not None and base_overlap is not None and tuned_overlap < base_overlap * 0.9)
-            or (tuned_format is not None and base_format is not None and tuned_format < base_format * 0.9)
-            or (tuned_overlap is None and tuned_format is None and tuned_loss is not None and base_loss is not None and tuned_loss > base_loss * 1.1)
+            (tuned_quality is not None and base_quality is not None and tuned_quality < base_quality)
+            or (tuned_format is not None and base_format is not None and tuned_format < base_format)
         )
         eval_loss = tuned_loss
         evaluation = {
@@ -683,9 +1055,26 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         results.append(evaluation)
         return {
             "evaluation_results": results,
+            "baseline_results": [item for item in state.get("baseline_results", []) if item.get("modelId") != key] + [baseline],
             "candidate_status": "evaluated" if generated.get("status") == "complete" and not quality_regression else "failed",
-            "retry_reason": "Tuned quality regressed by more than 10% against the base model." if quality_regression else None if generated.get("status") == "complete" else generated.get("message", "Tuned evaluation was unavailable."),
+            "retry_reason": "Measured task correctness or format validity regressed against the base model." if quality_regression else None if generated.get("status") == "complete" else generated.get("message", "Tuned evaluation was unavailable."),
         }
+
+    async def tuned_accuracy_reviewer(state: WorkflowState) -> dict[str, Any]:
+        candidate = _current_candidate(state)
+        model_id = _candidate_key(candidate)
+        baseline = next((item for item in reversed(state.get("baseline_results", [])) if item.get("modelId") == model_id), None)
+        tuned = next((item for item in reversed(state.get("evaluation_results", [])) if item.get("modelId") == model_id), None)
+        manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
+        ref = manifest["evalDataset"]
+        dataset = load_source(ref["source"], ref["name"], ref.get("extension"))
+        results = await grade_results(state, dataset, [item for item in (baseline, tuned) if item],
+            state.get("selected_instruction", ""), state.get("knowledge_documents") if state.get("selected_uses_rag") else None)
+        if len(results) != 2:
+            return {"accuracy_review": accuracy_agent_review(results)}
+        return {"baseline_results": [r for r in state.get("baseline_results", []) if r.get("modelId") != model_id] + [results[0]],
+                "evaluation_results": [r for r in state.get("evaluation_results", []) if r.get("modelId") != model_id] + [results[1]],
+                "accuracy_review": accuracy_agent_review(results)}
 
     async def assess_retry(state: WorkflowState) -> dict[str, Any]:
         candidate = _current_candidate(state)
@@ -744,21 +1133,29 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
     builder = StateGraph(WorkflowState)
     nodes = {
         "initialize": initialize,
+        "dataset_ready": dataset_ready,
         "load_and_normalize": load_and_normalize,
         "profile_and_split": profile_and_split,
+        "privacy_scanner": privacy_scanner,
         "assess_blockers": assess_blockers,
         "blocker_resolution_review": blocker_resolution_review,
         "apply_blocker_remediation": apply_blocker_remediation,
         "human_data_review": human_data_review,
         "clarify_data": clarify_data,
         "build_candidates": build_candidates,
+        "benchmark_models": benchmark_models,
+        "model_selection": model_selection,
         "baseline_evaluate": baseline_evaluate,
+        "accuracy_reviewer": accuracy_reviewer,
+        "prompt_review": prompt_review,
+        "automatic_analysis": automatic_analysis,
         "select_and_approve_plan": select_and_approve_plan,
         "prepare_candidate": prepare_candidate,
         "submit_training": submit_training,
         "wait_for_training": wait_for_training,
         "verify_artifacts": verify_artifacts,
         "evaluate_tuned": evaluate_tuned,
+        "tuned_accuracy_reviewer": tuned_accuracy_reviewer,
         "assess_retry": assess_retry,
         "advance_candidate": advance_candidate,
         "compare_final": compare_final,
@@ -772,20 +1169,29 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
     builder.add_edge(START, "initialize")
     builder.add_edge("initialize", "load_and_normalize")
     builder.add_edge("load_and_normalize", "profile_and_split")
-    builder.add_conditional_edges("profile_and_split", route_after_profile, {"assess_blockers": "assess_blockers", "human_data_review": "human_data_review", "clarify_data": "clarify_data", "build_candidates": "build_candidates"})
+    builder.add_edge("profile_and_split", "privacy_scanner")
+    builder.add_conditional_edges("privacy_scanner", route_after_profile, {"assess_blockers": "assess_blockers", "human_data_review": "human_data_review", "clarify_data": "clarify_data", "build_candidates": "build_candidates", "dataset_ready": "dataset_ready"})
     builder.add_edge("assess_blockers", "blocker_resolution_review")
     builder.add_conditional_edges("blocker_resolution_review", route_after_blocker_review, {"load_and_normalize": "load_and_normalize", "apply_blocker_remediation": "apply_blocker_remediation", "finish_blocked": "finish_blocked"})
     builder.add_edge("apply_blocker_remediation", "load_and_normalize")
-    builder.add_conditional_edges("human_data_review", route_after_data_review, {"load_and_normalize": "load_and_normalize", "build_candidates": "build_candidates", "finish_blocked": "finish_blocked"})
+    builder.add_conditional_edges("human_data_review", route_after_data_review, {"load_and_normalize": "load_and_normalize", "build_candidates": "build_candidates", "dataset_ready": "dataset_ready", "finish_blocked": "finish_blocked"})
     builder.add_conditional_edges("clarify_data", route_after_clarification, {"human_data_review": "human_data_review", "build_candidates": "build_candidates"})
-    builder.add_conditional_edges("build_candidates", lambda state: "finish_blocked" if not state.get("candidates") else "baseline_evaluate", {"finish_blocked": "finish_blocked", "baseline_evaluate": "baseline_evaluate"})
-    builder.add_edge("baseline_evaluate", "select_and_approve_plan")
+    builder.add_conditional_edges("build_candidates", lambda state: "finish_blocked" if not state.get("candidates") else "benchmark_models" if state.get("benchmark_selection") else "baseline_evaluate", {"finish_blocked": "finish_blocked", "benchmark_models":"benchmark_models", "baseline_evaluate": "baseline_evaluate"})
+    builder.add_conditional_edges("dataset_ready", lambda state: "finish_cancelled" if state.get("status") == "cancelled" else "build_candidates", {"finish_cancelled": "finish_cancelled", "build_candidates": "build_candidates"})
+    builder.add_conditional_edges("benchmark_models",lambda state: "finish_blocked" if state.get("status")=="blocked" else "model_selection")
+    builder.add_conditional_edges("model_selection",lambda state: END if state.get("status") in {"complete","cancelled"} else "baseline_evaluate" if state.get("status")=="baseline" else "model_selection")
+    builder.add_edge("baseline_evaluate", "accuracy_reviewer")
+    builder.add_conditional_edges("accuracy_reviewer", lambda state: "automatic_analysis" if state.get("auto_analysis") else "prompt_review")
+    builder.add_edge("automatic_analysis", "prompt_review")
+    builder.add_conditional_edges("prompt_review", lambda state: state.get("prompt_action"), {"auto_analyze":"baseline_evaluate", "try_prompt":"baseline_evaluate", "fine_tune":"select_and_approve_plan", "keep_baseline":END, "abort":"finish_cancelled"})
     builder.add_conditional_edges("select_and_approve_plan", route_after_plan, {"prepare_candidate": "prepare_candidate", "finish_cancelled": "finish_cancelled"})
     builder.add_edge("prepare_candidate", "submit_training")
     builder.add_edge("submit_training", "wait_for_training")
     builder.add_conditional_edges("wait_for_training", route_after_training, {"verify_artifacts": "verify_artifacts", "assess_retry": "assess_retry"})
     builder.add_conditional_edges("verify_artifacts", route_after_verification, {"evaluate_tuned": "evaluate_tuned", "assess_retry": "assess_retry"})
-    builder.add_conditional_edges("evaluate_tuned", lambda state: "advance_candidate" if state.get("candidate_status") == "evaluated" else "assess_retry", {"advance_candidate": "advance_candidate", "assess_retry": "assess_retry"})
+    builder.add_edge("evaluate_tuned", "tuned_accuracy_reviewer")
+    # Final outcomes are report-only: never use held-out quality or judge failures to retrain.
+    builder.add_edge("tuned_accuracy_reviewer", "advance_candidate")
     builder.add_conditional_edges("assess_retry", route_after_retry, {"submit_training": "submit_training", "advance_candidate": "advance_candidate", "finish_failed": "finish_failed"})
     builder.add_conditional_edges("advance_candidate", route_after_advance, {"prepare_candidate": "prepare_candidate", "compare_final": "compare_final"})
     builder.add_edge("compare_final", END)

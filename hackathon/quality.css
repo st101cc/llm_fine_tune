@@ -1,0 +1,9 @@
+.quality-panel h2 {margin-top:26px}
+.quality-panel input[type=file], .quality-panel textarea, .quality-panel select {display:block;width:100%;margin:8px 0 18px}
+.quality-panel textarea {background:var(--bg);color:inherit;border:1px solid var(--border);padding:12px;border-radius:8px;font:inherit}
+.quality-actions {display:flex;flex-wrap:wrap;gap:10px;margin:16px 0}
+.quality-finding {padding:18px 0;border-bottom:1px solid var(--border)}
+.quality-diff {display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.quality-panel pre {white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-family:Consolas,monospace}
+#quality-error {color:var(--amber);white-space:pre-wrap}
+@media(max-width:700px){.quality-diff {grid-template-columns:1fr}}

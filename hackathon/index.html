@@ -6,12 +6,11 @@
     <meta name="theme-color" content="#08111f" />
     <title>ForgeTune — Local model training</title>
     <meta name="description" content="Fine-tune language models on your own computer." />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="advisor.css" />
     <link rel="stylesheet" href="history.css" />
+    <link rel="stylesheet" href="datasets.css" />
+    <link rel="stylesheet" href="quality.css" />
   </head>
   <body>
     <div class="shell">
@@ -19,20 +18,26 @@
         <a class="brand" href="#/workspace"><span class="brand-mark">✦</span><span>ForgeTune<small>local model studio</small></span></a>
         <nav>
           <a href="#/workspace" data-route="workspace">◈ Workspace</a>
+          <a href="#/quality" data-route="quality">◇ Dataset quality</a>
+          <a href="#/quality-evaluations" data-route="quality-evaluations">◇ Evaluations</a>
           <a href="#/runs" data-route="runs">◷ Training runs</a>
           <a href="#/models" data-route="models">◇ Model catalog</a>
+          <a href="#/methods" data-route="methods">◇ Fine-tuning methods</a>
         </nav>
         <section class="hardware-card">
           <span class="eyebrow">Local compute</span>
           <strong id="gpu-name">Checking GPU…</strong>
-          <span id="gpu-memory">24 GB VRAM detected</span>
+          <span id="gpu-memory">GPU memory unavailable</span>
           <div class="status-line"><i></i><span id="trainer-status">Trainer not connected</span></div>
         </section>
-        <p class="privacy-note">Your datasets and weights stay on this computer.</p>
+        <p class="privacy-note">Data stays local unless you enable cloud assistance.</p>
       </aside>
       <main id="app" class="content" tabindex="-1"></main>
     </div>
     <div id="toast-region" class="toast-region" aria-live="polite"></div>
+    <script src="datasets.js"></script>
+    <script src="workflow-tools.js"></script>
+    <script src="quality.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
