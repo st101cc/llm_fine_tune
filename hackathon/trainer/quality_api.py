@@ -1,4 +1,5 @@
 """Local-only quality API; no training or hosted services required."""
+from typing import Literal
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import wraps
@@ -36,6 +37,7 @@ class VersionRequest(StrictRequest):
 
 
 class EvaluationRequest(StrictRequest):
+    loadMode: Literal["fp16", "bnb4"] = "fp16"
     cases: list[dict] = Field(default_factory=list, max_length=50000)
     answers: list[dict] = Field(default_factory=list, max_length=150000)
     policy: dict = Field(default_factory=dict)
@@ -287,7 +289,7 @@ def install_quality_routes(app, get_root):
             adapter = (run_dir / 'adapter').resolve()
             if not adapter.is_relative_to(run_dir):
                 raise ValueError('Invalid adapter artifact.')
-        record = {'id': str(uuid.uuid4()), 'createdAt': datetime.now(timezone.utc).isoformat(), 'status': 'queued', 'policy': policy,
+        record = {'loadMode': body.loadMode, 'id': str(uuid.uuid4()), 'createdAt': datetime.now(timezone.utc).isoformat(), 'status': 'queued', 'policy': policy,
                   'frozenCasesHash': digest(cases), 'cases': cases, 'benchmark': {k: v for k, v in benchmark.items() if k != 'cases'} if benchmark else None}
         target.put('evaluation', record)
 
@@ -298,7 +300,7 @@ def install_quality_routes(app, get_root):
                 answers = body.answers
                 if body.generate:
                     from quality_pilot import generate_bounded
-                    generated = generate_bounded(cases, runtime_root=target.root, adapter_path=adapter, cancelled=event.is_set, max_seconds=body.maxGpuSeconds)
+                    generated = generate_bounded(cases, runtime_root=target.root, adapter_path=adapter, cancelled=event.is_set, max_seconds=body.maxGpuSeconds, **({"load_mode": body.loadMode} if body.loadMode != "fp16" else {}))
                     record['generation'] = generated
                     if generated['status'] != 'complete':
                         record.update(status=generated['status'], message=generated['message'])

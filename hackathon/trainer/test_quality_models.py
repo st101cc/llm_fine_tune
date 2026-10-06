@@ -78,6 +78,10 @@ def test_generation_greedy_no_truncation_and_provenance(models, snapshot, monkey
     import torch
     import transformers
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    for name in ("reset_peak_memory_stats", "synchronize", "empty_cache"):
+        monkeypatch.setattr(torch.cuda, name, lambda: None)
+    for name in ("max_memory_allocated", "max_memory_reserved"):
+        monkeypatch.setattr(torch.cuda, name, lambda: 0)
     class Inputs(dict):
         def to(self, device):
             return self

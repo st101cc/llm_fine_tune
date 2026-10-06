@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 
 from quality_evaluation import fingerprint
 
@@ -111,12 +112,21 @@ def _adapter_metadata(adapter_path, model_id, revision):
     return {"path": str(path), "hash": fingerprint({"config": file_hash(config_path), "weights": file_hash(weights)})}
 
 
-def generate_answers(cases, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, *, revision=None):
+def load_settings(load_mode="fp16"):
+    if load_mode not in ("fp16", "bnb4"):
+        raise ValueError("Unknown inference load mode")
+    return {"loadMode": load_mode, "contextTokenBudget": 2048 if load_mode == "bnb4" else 4096,
+            "minFreeMiB": 12000 if load_mode == "bnb4" else 24000,
+            "quantization": {"type": "nf4", "doubleQuant": True, "computeDtype": "float16"} if load_mode == "bnb4" else None}
+
+
+def generate_answers(cases, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, *, revision=None, load_mode="fp16", on_answer=None):
     """Sequential single-device greedy inference. Refuse input/output truncation.
 
     Call from quality_pilot for a process-enforced time limit. Cooperative
     cancellation also interrupts generation between decoding steps.
     """
+    settings = load_settings(load_mode)
     cases = list(cases)
     if cancelled() or not cases:
         return []
@@ -143,13 +153,21 @@ def generate_answers(cases, model_id=TAIDE_ID, adapter_path=None, cancelled=lamb
             return []
         model = None
         answers = []
+        started = time.monotonic()
+        torch.cuda.reset_peak_memory_stats()
         try:
             tokenizer = AutoTokenizer.from_pretrained(status["path"], local_files_only=True, trust_remote_code=False)
-            model = AutoModelForCausalLM.from_pretrained(status["path"], local_files_only=True, trust_remote_code=False, device_map={"": 0}, torch_dtype=torch.float16)
+            options = {}
+            if load_mode == "bnb4":
+                from transformers import BitsAndBytesConfig
+                options["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.float16)
+            model = AutoModelForCausalLM.from_pretrained(status["path"], local_files_only=True, trust_remote_code=False, device_map={"": 0}, torch_dtype=torch.float16, **options)
             if adapter:
                 from peft import PeftModel
                 model = PeftModel.from_pretrained(model, adapter["path"], local_files_only=True, is_trainable=False)
             model.eval()
+            torch.cuda.synchronize()
+            load_seconds = time.monotonic() - started
             for case in cases:
                 if cancelled():
                     break
@@ -160,11 +178,14 @@ def generate_answers(cases, model_id=TAIDE_ID, adapter_path=None, cancelled=lamb
                 inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False, truncation=False).to(model.device)
                 input_length = inputs["input_ids"].shape[1]
                 context = min(getattr(tokenizer, "model_max_length", 10**12), getattr(model.config, "max_position_embeddings", 0))
-                if not context or input_length + limit > min(context, 4096):
+                if not context or input_length + limit > min(context, settings["contextTokenBudget"]):
                     raise ValueError("Input exceeds context budget; truncation is forbidden")
                 eos = getattr(model.generation_config, "eos_token_id", None) or tokenizer.eos_token_id
+                generation_started = time.monotonic()
                 with torch.inference_mode():
                     output = model.generate(**inputs, do_sample=False, num_beams=1, max_new_tokens=limit, eos_token_id=eos, pad_token_id=tokenizer.eos_token_id, stopping_criteria=StoppingCriteriaList([Cancelled()]))
+                torch.cuda.synchronize()
+                generation_seconds = time.monotonic() - generation_started
                 if cancelled():
                     break
                 tokens = output[0][input_length:]
@@ -173,21 +194,30 @@ def generate_answers(cases, model_id=TAIDE_ID, adapter_path=None, cancelled=lamb
                     raise ValueError("Output hit its token limit; truncated answers are not accepted")
                 text = tokenizer.decode(tokens, skip_special_tokens=True)
                 protocol = {"version": "quality-generation-v1", "instruction": instruction, "zeroShot": True, "doSample": False, "numBeams": 1, "maxNewTokens": limit, "parser": "whole-answer-A-D" if case["task"] == "mcq" else "task-specific", "chatTemplateHash": fingerprint(getattr(tokenizer, "chat_template", None))}
-                answers.append({"caseId": case["id"], "candidate": model_id + ("@adapter:" + adapter["hash"] if adapter else "@base"), "output": text, "protocol": protocol, "provenance": {"modelId": model_id, "revision": status["revision"], "license": status["license"], "adapter": adapter, "promptHash": fingerprint(prompt)}})
+                protocol.update({key: settings[key] for key in ("loadMode", "contextTokenBudget", "quantization")})
+                answers.append({"caseId": case["id"], "candidate": model_id + ("@adapter:" + adapter["hash"] if adapter else "@base"), "output": text, "protocol": protocol, "telemetry": {"loadSeconds": load_seconds, "generationSeconds": generation_seconds, "inputTokens": input_length, "outputTokens": len(tokens), "peakAllocatedBytes": torch.cuda.max_memory_allocated(), "peakReservedBytes": torch.cuda.max_memory_reserved()}, "provenance": {"modelId": model_id, "revision": status["revision"], "license": status["license"], "adapter": adapter, "promptHash": fingerprint(prompt)}})
+                if on_answer:
+                    on_answer(answers)
             return answers
+        except Exception as exc:
+            exc.answers = answers
+            raise
         finally:
             del model
             gc.collect()
             torch.cuda.empty_cache()
 
 
-def prepare_model(model_id=TAIDE_ID):
+def prepare_model(model_id=TAIDE_ID, *, revision=None):
     """Explicit network action; verify existing gate permission, never accept terms."""
     from huggingface_hub import HfApi, snapshot_download
     api = HfApi()
+    requested = _immutable(revision) if revision else None
     try:
-        info = api.model_info(model_id)
+        info = api.model_info(model_id, **({"revision": requested} if requested else {}))
         revision = _immutable(info.sha)
+        if requested and revision != requested:
+            raise ValueError("Model revision differs from the frozen baseline")
         if info.gated:
             api.auth_check(repo_id=model_id, repo_type="model")
         path = snapshot_download(repo_id=model_id, revision=revision, local_files_only=False)
@@ -278,10 +308,11 @@ def main():
     prepare = sub.add_parser("prepare", help="Explicit download; never accepts gate/license terms")
     prepare.add_argument("target", choices=("model", "benchmark"))
     prepare.add_argument("--model", default=TAIDE_ID)
+    prepare.add_argument("--revision", help="Immutable model SHA; preserves the frozen inference baseline")
     prepare.add_argument("--root", type=Path, default=BENCHMARKS)
     prepare.add_argument("--all-subjects", action="store_true", help="10 test questions from every subject")
     args = parser.parse_args()
-    result = get_model_status(args.model) if args.command == "status" else (prepare_model(args.model) if args.target == "model" else prepare_benchmark(args.root, all_subjects=args.all_subjects))
+    result = get_model_status(args.model) if args.command == "status" else (prepare_model(args.model, revision=args.revision) if args.target == "model" else prepare_benchmark(args.root, all_subjects=args.all_subjects))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 
-from quality_models import TAIDE_ID
+from quality_models import TAIDE_ID, load_settings
 
 
 def _runtime_directory(runtime_root):
@@ -72,7 +72,8 @@ def _settle_budget(runtime_root, reservation, charged):
         db.execute("UPDATE reservations SET charge=?,status='settled' WHERE id=? AND status='reserved'", (charged, reservation["id"]))
 
 
-def _select_idle_gpu(gpu=None):
+def _select_idle_gpu(gpu=None, *, load_mode="fp16"):
+    settings = load_settings(load_mode)
     try:
         if gpu is not None and (not isinstance(gpu, str) or not re.fullmatch(r"(?:[0-9]+|GPU-[A-Za-z0-9-]+)", gpu)):
             raise ValueError("Select one GPU")
@@ -88,11 +89,11 @@ def _select_idle_gpu(gpu=None):
             if processes:
                 busy = True
                 continue
-            if int(free) >= 24000:
+            if int(free) >= settings["minFreeMiB"]:
                 return device, None, None
             free_but_small = True
         if free_but_small:
-            return None, "insufficient_vram", "An idle GPU with at least 24000 MiB free VRAM is required for local FP16 TAIDE; free memory or use a larger GPU."
+            return None, "insufficient_vram", f"An idle GPU with at least {settings['minFreeMiB']} MiB free VRAM is required for {load_mode}; this preflight does not guarantee loading."
         if busy:
             return None, "gpu_busy", "All available GPUs have unrelated compute processes. Wait for an idle GPU; no process was stopped."
         return None, "no_gpu", "No usable local NVIDIA GPU was found. Configure a CUDA host before generation."
@@ -100,7 +101,7 @@ def _select_idle_gpu(gpu=None):
         return None, "gpu_unavailable", "Cannot inspect GPU availability. Check NVIDIA drivers and nvidia-smi; no GPU was selected."
 
 
-def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, max_seconds=1800, log_dir=None):
+def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, max_seconds=1800, log_dir=None, load_mode="fp16"):
     """Server-owned argument lists only; shares the generation budget ledger.
 
     Does not alter training parameters or permit network/model preparation.
@@ -108,6 +109,7 @@ def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, 
     """
     if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or not 0 < max_seconds <= 1800:
         raise ValueError("max_seconds must be > 0 and <= 1800")
+    load_settings(load_mode)
     commands = list(commands)
     if any(not isinstance(command, (list, tuple)) or not command or any(not isinstance(part, str) for part in command) for command in commands):
         raise ValueError("Commands must be argument lists, never shell strings")
@@ -117,7 +119,7 @@ def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, 
         return response("cancelled", "Cancelled before launching a worker.")
     if budget_status(root)["remainingGpuSeconds"] <= 0:
         return response("budget_exhausted", "Persistent 1800 GPU-second budget exhausted.")
-    device, reason, message = _select_idle_gpu(gpu)
+    device, reason, message = _select_idle_gpu(gpu, **({"load_mode": load_mode} if load_mode != "fp16" else {}))
     if device is None:
         return response("unavailable", message, reason=reason)
     reservation = _reserve_budget(root, max_seconds)
@@ -139,14 +141,15 @@ def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, 
         _settle_budget(root, reservation, charged)
 
 
-def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, max_seconds=1800, revision=None):
+def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, max_seconds=1800, revision=None, load_mode="fp16"):
     """Route-safe offline inference: reserved persistent budget + owned subprocess.
 
     Status reads do not infer license acceptance. No download or training occurs.
-    24000 MiB is a conservative admission threshold, not a guarantee against OOM.
-    Input plus output is limited to 4096 tokens by the generation worker.
+    Mode-specific VRAM admission is not a guarantee against OOM.
+    The worker refuses input/output truncation and checkpoints completed answers.
     """
     from quality_models import get_model_status
+    load_settings(load_mode)
     cases = list(cases)
     if not cases or len(cases) > 1000 or any(not isinstance(c, dict) or not isinstance(c.get("id"), str) or not c["id"] or not isinstance(c.get("input"), str) or len(c["input"]) > 65536 or c.get("task") not in ("classification", "json", "writing", "mcq") for c in cases):
         raise ValueError("Generation requires 1-1000 valid cases, each input at most 65536 characters")
@@ -155,7 +158,7 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
     if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or not 0 < max_seconds <= 1800:
         raise ValueError("max_seconds must be > 0 and <= 1800")
     def response(status, message, **extra):
-        return {"status": status, "answers": [], "message": message, **extra, "budget": budget_status(runtime_root)}
+        return {"status": status, "answers": [], "loadMode": load_mode, "message": message, **extra, "budget": budget_status(runtime_root)}
     if cancelled():
         return response("cancelled", "Generation cancelled before launch.")
     if budget_status(runtime_root)["remainingGpuSeconds"] <= 0:
@@ -167,15 +170,16 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
     if not directory.resolve().is_relative_to(_runtime_directory(runtime_root)):
         raise ValueError("Generation directory escapes runtime area")
     directory.mkdir(parents=True)
-    request = {"cases": cases, "modelId": model_id, "revision": status["revision"], "adapterPath": str(Path(adapter_path).resolve()) if adapter_path else None}
+    request = {"loadMode": load_mode, "cases": cases, "modelId": model_id, "revision": status["revision"], "adapterPath": str(Path(adapter_path).resolve()) if adapter_path else None}
     (directory / "request.json").write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
     command = [sys.executable, "-B", str(Path(__file__).resolve()), "--output", str(directory), "--model", model_id, "--revision", status["revision"], "--worker", "generate"]
-    run = run_with_pilot_budget(runtime_root, [command], max_seconds=max_seconds, cancelled=cancelled, log_dir=directory)
-    if run["status"] in ("cancelled", "budget_exhausted", "unavailable"):
-        return response(run["status"], run["message"], reason=run.get("reason"), run=run)
+    run = run_with_pilot_budget(runtime_root, [command], max_seconds=max_seconds, cancelled=cancelled, log_dir=directory, **({"load_mode": load_mode} if load_mode != "fp16" else {}))
     result_path = directory / "answers.json"
+    partial = json.loads(result_path.read_text(encoding="utf-8")).get("answers", []) if result_path.is_file() else []
+    if run["status"] in ("cancelled", "budget_exhausted", "unavailable"):
+        return response(run["status"], run["message"], answers=partial, reason=run.get("reason"), run=run)
     if run["status"] != "complete" or not result_path.is_file():
-        return response("unavailable", "Local generation worker failed. Inspect its local phase-0.log; verify CUDA, Transformers, PEFT (for adapters), and available VRAM.", reason="worker_failed", run=run)
+        return response("unavailable", "Local generation worker failed. Inspect its local phase-0.log; verify CUDA, Transformers, PEFT (for adapters), and available VRAM.", answers=partial, reason="worker_failed", run=run)
     generated = json.loads(result_path.read_text(encoding="utf-8"))
     return response(generated["status"], generated["message"], **{key: value for key, value in generated.items() if key not in ("status", "message")}, run=run)
 
@@ -448,11 +452,17 @@ def _worker(output, model_id, phase, revision):
         from quality_models import generate_answers
         request = json.loads((output / "request.json").read_text(encoding="utf-8"))
         try:
-            answers = generate_answers(request["cases"], request["modelId"], adapter_path=request["adapterPath"], revision=request["revision"])
+            def checkpoint(answers):
+                temporary = output / "answers.tmp"
+                temporary.write_text(json.dumps({"status": "running", "answers": answers}, ensure_ascii=False), encoding="utf-8")
+                temporary.replace(output / "answers.json")
+            answers = generate_answers(request["cases"], request["modelId"], adapter_path=request["adapterPath"], revision=request["revision"], load_mode=request.get("loadMode", "fp16"), on_answer=checkpoint)
             result = {"status": "complete", "answers": answers, "message": "Offline local generation completed."}
         except Exception as exc:
-            result = {"status": "unavailable", "answers": [], "reason": "generation_failed", "message": f"{type(exc).__name__}: {exc}"}
-        (output / "answers.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            result = {"status": "unavailable", "answers": getattr(exc, "answers", []), "reason": "generation_failed", "message": f"{type(exc).__name__}: {exc}"}
+        temporary = output / "answers.tmp"
+        temporary.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(output / "answers.json")
         return
     if phase.startswith("train-"):
         _train_worker(output, model_id, phase.removeprefix("train-"), revision)
@@ -499,7 +509,7 @@ def evaluate_controlled_outputs(cases, answers, policy):
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--supervise":
         raise SystemExit(_supervise_command(sys.argv[2:]))
-    from quality_models import TAIDE_ID, get_model_status
+    from quality_models import TAIDE_ID, load_settings, get_model_status
     from quality_evaluation import fingerprint
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
