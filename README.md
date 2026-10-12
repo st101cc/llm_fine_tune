@@ -224,7 +224,7 @@ No independent retrieval corpus is connected to the website workflow yet. `train
 
 
 ### Prefer local 24 GB GPU, otherwise use dev-01
-Run `powershell -ExecutionPolicy Bypass -File hackathon/start-auto.ps1` from the repository. Selection happens at startup: a local NVIDIA GPU reporting at least 24,000 MiB is preferred; otherwise the launcher uses the existing `gcp-dev` SSH alias. Two smaller cards are not counted as one 24 GB card. Use `-CheckOnly` to inspect the target and `-SelfTest` to check the selection rule.
+Run `powershell -ExecutionPolicy Bypass -File start-auto.ps1` from the repository. Selection happens at startup: a local NVIDIA GPU reporting at least 24,000 MiB is preferred; otherwise the launcher uses the existing `gcp-dev` SSH alias. Two smaller cards are not counted as one 24 GB card. Use `-CheckOnly` to inspect the target and `-SelfTest` to check the selection rule.
 
 Local mode requires CUDA-enabled PyTorch in `.venv`. VM mode requires a Python 3.11+ CUDA environment at `~/forgetune-backend/.venv311` (Python 3.10 loses LangGraph interrupt context), with the backend deployed under `~/forgetune-backend`, started with `bash ~/forgetune-backend/trainer/start-vm-backend.sh`. The API binds to VM loopback port 18000 and the launcher forwards it over SSH. No public API port is opened. Dataset and checkpoint migration is a separate approved operation; the launcher does not synchronize data or fail over during running jobs. Restart the launcher to change targets. Existing independently started website processes must be stopped before the launcher can take port 4173.
 
@@ -273,4 +273,4 @@ At the model review checkpoint, the existing Compass form locks the split, numbe
 
 Existing saved workflows retain their original decisions. **Benchmark models on this dataset** creates a new workflow using the same dataset and split seed. Previously inspected final results remain historical; use a fresh untouched final set before claiming a new model improvement.
 
-Checks: `.venv/Scripts/python.exe -m pytest hackathon/trainer -q`, `node --test hackathon/test-compass.mjs`, and `node hackathon/test-model-selection.cjs` (set `PLAYWRIGHT_MODULE` if Playwright is supplied by the desktop runtime).
+Checks: `.venv/Scripts/python.exe -m pytest trainer -q`, `node --test test-compass.mjs`, and `node test-model-selection.cjs` (set `PLAYWRIGHT_MODULE` if Playwright is supplied by the desktop runtime).

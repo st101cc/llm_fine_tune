@@ -27,7 +27,7 @@ if ($localGpu) {
     & $pythonPath -c 'import torch; assert torch.cuda.is_available(), "Install CUDA-enabled PyTorch in the project environment"'
     if ($LASTEXITCODE -ne 0) { throw 'Local CUDA runtime is unavailable.' }
     if (-not (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue)) {
-        Start-Process $pythonPath -ArgumentList '-m uvicorn app:app --app-dir hackathon/trainer --host 127.0.0.1 --port 8000' -WorkingDirectory $projectPath -WindowStyle Hidden -RedirectStandardOutput "$logPath/api.out.log" -RedirectStandardError "$logPath/api.err.log" | Out-Null
+        Start-Process $pythonPath -ArgumentList '-m uvicorn app:app --app-dir trainer --host 127.0.0.1 --port 8000' -WorkingDirectory $projectPath -WindowStyle Hidden -RedirectStandardOutput "$logPath/api.out.log" -RedirectStandardError "$logPath/api.err.log" | Out-Null
     }
     $env:TRAINER_URL = 'http://127.0.0.1:8000'
 } else {

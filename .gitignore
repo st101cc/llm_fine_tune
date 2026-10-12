@@ -13,7 +13,7 @@ htmlcov/
 
 # Runtime datasets, databases, logs, models, and adapters
 .forge-data/
-/hackathon/trainer/data/
+/trainer/data/
 *.log
 
 # Local credentials; keep configuration examples

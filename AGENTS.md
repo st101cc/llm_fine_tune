@@ -2,7 +2,7 @@
 
 ## Project Structure
 
-The working application lives under `hackathon/`:
+The working application lives at the repository root:
 
 - `app.js`, `index.html`, and `*.css` contain the browser UI.
 - `server.mjs` and supporting `*.mjs`/`*.js` files provide the Node.js web server and workflow helpers.
@@ -15,13 +15,13 @@ The working application lives under `hackathon/`:
 From the repository root:
 
 ```powershell
-npm --prefix hackathon start
-python -m pytest hackathon/trainer -q
-node --test hackathon/test-compass.mjs
-node hackathon/test-datasets.cjs
+npm start
+python -m pytest trainer -q
+node --test test-compass.mjs
+node test-datasets.cjs
 ```
 
-The first command serves the UI at `http://127.0.0.1:4173`. Python tests cover the trainer and workflow logic. Browser-oriented scripts require the web server and Playwright; set `PLAYWRIGHT_MODULE` when the runtime does not provide it. For local GPU/VM startup, use `powershell -ExecutionPolicy Bypass -File hackathon/start-auto.ps1`; `-CheckOnly` inspects the target and `-SelfTest` checks GPU selection.
+The first command serves the UI at `http://127.0.0.1:4173`. Python tests cover the trainer and workflow logic. Browser-oriented scripts require the web server and Playwright; set `PLAYWRIGHT_MODULE` when the runtime does not provide it. For local GPU/VM startup, use `powershell -ExecutionPolicy Bypass -File start-auto.ps1`; `-CheckOnly` inspects the target and `-SelfTest` checks GPU selection.
 
 ## Coding Style and Naming
 
@@ -29,7 +29,7 @@ Use 2-space indentation in JavaScript and 4 spaces in Python. Keep the existing 
 
 ## Testing Guidelines
 
-Add Python tests beside the code in `hackathon/trainer/test_*.py`. Use pytest and temporary directories/mocks for filesystem, model, and workflow boundaries. Add Node tests as `hackathon/test-*.cjs` or `hackathon/test-*.mjs`. Run the narrowest relevant test first, then the full trainer suite before submitting.
+Add Python tests beside the code in `trainer/test_*.py`. Use pytest and temporary directories/mocks for filesystem, model, and workflow boundaries. Add Node tests as `test-*.cjs` or `test-*.mjs`. Run the narrowest relevant test first, then the full trainer suite before submitting.
 
 ## Commits and Pull Requests
 
@@ -37,4 +37,4 @@ History is minimal, so use concise imperative subjects, for example `Fix dataset
 
 ## Security and Configuration
 
-Keep credentials in `hackathon/trainer/.env` or the repository `.env`; commit only `.env.example` files. Never expose API keys to browser code or commit datasets, checkpoints, adapters, logs, or local runtime state.
+Keep credentials in `trainer/.env` or the repository `.env`; commit only `.env.example` files. Never expose API keys to browser code or commit datasets, checkpoints, adapters, logs, or local runtime state.

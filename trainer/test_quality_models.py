@@ -250,7 +250,7 @@ def test_fixture_partitions_are_fixed_and_independent(pilot):
 
 
 def test_worker_has_independent_deadline_if_parent_disappears(pilot):
-    command = [sys.executable, "-B", "-c", "import sys,time; sys.path.insert(0, 'hackathon/trainer'); from quality_pilot import _arm_worker_deadline; _arm_worker_deadline(time.monotonic()+.15); time.sleep(30)"]
+    command = [sys.executable, "-B", "-c", "import sys,time; sys.path.insert(0, 'trainer'); from quality_pilot import _arm_worker_deadline; _arm_worker_deadline(time.monotonic()+.15); time.sleep(30)"]
     completed = subprocess.run(command, timeout=5)
     assert completed.returncode == 124
 
@@ -394,7 +394,7 @@ def test_training_command_wrapper_uses_shared_budget_and_offline_env(pilot, tmp_
 
 def test_supervisor_enforces_deadline_without_api_parent(pilot):
     import os
-    command = [sys.executable, "-B", "hackathon/trainer/quality_pilot.py", "--supervise", sys.executable, "-c", "import time; time.sleep(30)"]
+    command = [sys.executable, "-B", "trainer/quality_pilot.py", "--supervise", sys.executable, "-c", "import time; time.sleep(30)"]
     completed = subprocess.run(command, env={**os.environ, "QUALITY_WORKER_DEADLINE": str(time.monotonic() + .3)}, timeout=5, start_new_session=os.name != "nt")
     assert completed.returncode == (124 if os.name == "nt" else -9)
 
