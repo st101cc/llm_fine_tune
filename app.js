@@ -73,7 +73,7 @@ function shell(kicker, title, lead, actions = "") {
 }
 
 function steps(active) {
-  return "<div class='steps'>" + ["Dataset", "Model & method", "Train", "Evaluate & export"].map((name, index) =>
+  return "<div class='steps'>" + ["Analyze dataset", "Test base & prompts", "Review & train", "Compare & decide"].map((name, index) =>
     "<div class='step " + (index === active ? "active" : index < active ? "done" : "") + "'><b>" + (index < active ? "✓" : index + 1) + "</b>" + name + "</div>"
   ).join("") + "</div>";
 }
@@ -111,7 +111,7 @@ function datasetCheckRequired() {
   return "<div class='notice dataset-check-needed'><strong>Dataset check required</strong><br>Check schema, size, invalid rows, and duplicates before selecting a model.</div>";
 }
 
-function workspace() {
+function datasetWorkspace() {
   const selected = model();
   app.innerHTML = shell("Fine-tuning workspace", "Train a model that knows your work.", "Bring a dataset, choose a safe preset, and ForgeTune handles the local training workflow.", "<button class='button' id='open-runs'>View run history</button>") +
     steps(datasetReady() ? 1 : 0) +
@@ -121,14 +121,14 @@ function workspace() {
     "</div><div id='dataset-input'>" + datasetInput() + datasetCheckRequired() + (state.datasetError ? "<div class='notice dataset-error'><strong>Dataset could not be imported</strong><br>" + escapeHtml(state.datasetError) + "</div>" : "") + datasetCheckReport() + "</div></div></section><aside class='card'><div class='section-head'><div><h2>Recommended starting point</h2><p>Based on your visible 24 GB GPU.</p></div></div><div class='summary'>" +
     summary("Base model", selected.name + " " + selected.size) + summary("Training method", "4-bit QLoRA") + summary("Expected VRAM", selected.vram) + summary("Held-out evaluation", "10% split") +
     "<button class='button primary' id='continue-model' " + (datasetReady() ? "" : "disabled") + ">" + (datasetBlockers().length ? "Resolve dataset checks first" : state.dataset && !state.analysis ? "Check dataset first" : "Continue to model setup →") + "</button></div></aside></div></div>";
-  document.querySelectorAll("input[name=source]").forEach(input => input.addEventListener("change", () => { state.source = input.value; workspace(); }));
+  document.querySelectorAll("input[name=source]").forEach(input => input.addEventListener("change", () => { state.source = input.value; datasetWorkspace(); }));
   document.querySelector("#open-runs").onclick = () => location.hash = "#/runs";
   document.querySelector("#continue-model")?.addEventListener("click", () => location.hash = "#/configure");
   document.querySelector("#sample-data")?.addEventListener("click", () => {
     state.file = null;
     state.dataset = {name:"Customer support replies (sample)", format:"prompt / completion", rows:240, source:"upload"};
     state.analysis = demoAnalysis();
-    workspace(); toast("Sample dataset ready", "240 examples will be split 90/10 for training and evaluation.");
+    datasetWorkspace(); toast("Sample dataset ready", "240 examples will be split 90/10 for training and evaluation.");
   });
   document.querySelector("#file-input")?.addEventListener("change", async event => {
     const file = event.target.files[0]; if (!file) return;
@@ -159,7 +159,7 @@ async function uploadAndAnalyze(file) {
   } catch {
     const extension = file.name.split(".").pop().toUpperCase();
     state.dataset = {name:file.name, format:extension, rows:"preview only", source:"upload"};
-    state.analysis = demoAnalysis(); workspace();
+    state.analysis = demoAnalysis(); datasetWorkspace();
     toast("Preview analysis shown", "Start the WSL trainer for a real local profile.");
   }
 }
@@ -230,7 +230,7 @@ function configure() {
     "</div></div></section><aside class='card'><div class='section-head'><div><h2>Safe preset</h2><p>Optimized with gradient descent for a first useful run.</p></div></div><div class='summary'>" +
     summary("Rank / alpha", facts.validRows < 500 ? "8 / 16" : "16 / 32") + summary("Learning rate", "2e-4") + summary("Epochs", String(rec.epochs)) + summary("Batch / accumulation", "1 / 8") + summary("Context length", Math.min(4096, Math.max(1024, facts.estimatedTokenLength.p95 * 2)) + " tokens") +
     "<button class='button primary' id='start-train' " + (blockers.length ? "disabled" : "") + ">Start local training →</button></div></aside></div></div>";
-  document.querySelector("#back-data").onclick = () => location.hash = "#/workspace";
+  document.querySelector("#back-data").onclick = () => location.hash = "#/dataset";
   document.querySelectorAll("input[name=goal]").forEach(input => input.onchange = async () => { state.goal = input.value; await analyzeCurrentDataset(); });
   document.querySelector("#cloud-test").onclick = async () => { const response = await fetch("/api/advisor/connection-test", {method:"POST"}); const result = await response.json(); toast(result.ok ? "Cloud assist connected" : "Cloud assist unavailable", result.message); };
   document.querySelector("#cloud-clarify")?.addEventListener("click", () => analyzeCurrentDataset(true));
@@ -251,7 +251,7 @@ async function startWorkflow() {
     const response = await fetch("/api/workflow/runs", {
       method: "POST",
       headers: {"content-type": "application/json"},
-      body: JSON.stringify({dataset, goal:state.goal, cloud_assist:Boolean(state.cloudAssist), candidate_limit:3, max_retries:2, split_seed:42})
+      body: JSON.stringify({dataset, goal:state.goal, cloud_assist:Boolean(state.cloudAssist), candidate_limit:1, max_retries:2, split_seed:42})
     });
     if (!response.ok) throw new Error("Workflow could not be started.");
     const workflow = await response.json();
@@ -259,8 +259,7 @@ async function startWorkflow() {
     pollWorkflow(workflow.id);
     toast("Guided workflow started", "ForgeTune is profiling the dataset before any GPU training begins.");
   } catch {
-    // Keep the existing preview experience when the WSL trainer is offline.
-    await startRun();
+    toast("Workflow unavailable", "Start the local trainer and try again. No training run was created.");
   }
 }
 
@@ -292,20 +291,47 @@ function workflowAction(id, response, message) {
   }).catch(() => toast("Could not resume workflow", "The trainer may be busy or offline."));
 }
 
+function gradeDescription(grade) {
+  return grade ? `<p><strong>${escapeHtml(grade.task)} · ${escapeHtml(grade.verdict)}</strong> ${escapeHtml(grade.reason)}</p>` : "";
+}
+
+function gradingSummary(result) {
+  const q = result.qualityEvidence || {};
+  if (!q.estimated) return "";
+  return `<p>Local judge: ${escapeHtml(q.judgeModel)} · ${escapeHtml(q.rubricVersion)} · ${q.evaluatedExamples || 0}/${q.totalExamples || 0} answers graded · ${q.passedExamples || 0} pass · ${q.failedExamples || 0} fail · ${q.reviewExamples ?? Math.max(0, (q.totalExamples || 0) - (q.evaluatedExamples || 0))} need review. ${escapeHtml(q.message || "")}</p>`;
+}
+
+function recordedSamples(base, tuned = {}) {
+  const samples = base.samples || [];
+  if (!samples.length) return "<p>No recorded baseline responses are available.</p>";
+  return samples.map(sample => {
+    const after = (tuned.samples || []).find(item => item.rowId === sample.rowId);
+    return "<details class='experiment-example'><summary>Evaluation row " + escapeHtml(sample.rowId) + "</summary><strong>Input</strong><pre class='code'>" + escapeHtml(sample.input || "Input not retained") + "</pre>" + (sample.retrieved?.length ? "<p>Retrieved sources: " + sample.retrieved.map(item => escapeHtml(item.title || item.id)).join(", ") + "</p>" : "") + "<strong>Base response</strong><pre class='code'>" + escapeHtml(sample.baseOutput || "") + "</pre>" + gradeDescription(sample.grade) + (sample.referenceAvailable ? "<strong>Reference answer</strong><pre class='code'>" + escapeHtml(sample.reference || "") + "</pre>" : "") + (after ? "<strong>Tuned response</strong><pre class='code'>" + escapeHtml(after.tunedOutput || "") + "</pre>" + gradeDescription(after.grade) : "") + "</details>";
+  }).join("");
+}
+
 function workflowComparison(comparison) {
+  if (comparison?.decision === "keep_baseline" && !comparison.pairs?.length) return "<div class='notice'><strong>Base model retained</strong> " + escapeHtml(comparison.decisionReason || "") + "</div><pre class='code'>" + escapeHtml(comparison.instruction || "Base prompt, no extra instructions") + "</pre>";
   const pairs = comparison?.pairs || [];
   if (!pairs.length) return "<div class='empty'><strong>No comparable candidates</strong><span>The workflow finished without a valid tuned result.</span></div>";
-  return "<div class='metric-grid grid' style='margin-bottom:16px'><div class='metric'><span>Recommended model</span><strong style='font-size:14px'>" + escapeHtml(comparison.winner || "Review manually") + "</strong></div><div class='metric'><span>Evaluation examples</span><strong>" + (comparison.evaluationIds?.length || 0) + "</strong></div><div class='metric'><span>Goal</span><strong>" + escapeHtml(comparison.goal || "balanced") + "</strong></div></div>" +
-    "<div class='run-list'>" + pairs.map((pair, index) => "<div class='run'><div><strong>" + (index + 1) + ". " + escapeHtml(pair.modelId) + "</strong><span>Base → tuned overlap: " + (pair.base?.meanTokenOverlap ?? "n/a") + " → " + (pair.tuned?.meanTokenOverlap ?? "n/a") + " · " + (pair.passed ? "artifacts verified" : "review required") + "</span></div><span class='pill " + (pair.passed ? "complete" : "") + "'>" + (pair.passed ? "eligible" : "incomplete") + "</span></div>").join("") + "</div>";
+  const verdict = comparison.winner ? "A candidate improved — review before deployment" : comparison.decision === "keep_baseline" ? "Keep the base model" : "Improvement not established";
+  return `<div class="notice"><strong>${escapeHtml(verdict)}</strong><p>${comparison.winner ? "Inspect the measured gains and any regressions below." : "Training completed, but these results do not justify deploying the fine-tune as an improvement."}</p></div><p>${comparison.evaluationIds?.length || 0} unseen questions · Same questions and prompt for both models</p>` + pairs.map(pair => {
+    const base = pair.base || {}, tuned = pair.tuned || {};
+    const cutoffs = result => (result.samples || []).filter(sample => sample.hitTokenLimit).length;
+    const a = base.qualityEvidence || {}, b = tuned.qualityEvidence || {};
+    const measured = a.metric && base.evaluationIds?.length > 0 && a.coverage === 1 && b.coverage === 1 && a.metric === b.metric && a.evaluatorId === b.evaluatorId && a.rubric === b.rubric && a.evaluatedExamples === base.evaluationIds?.length && b.evaluatedExamples === tuned.evaluationIds?.length && JSON.stringify(base.evaluationIds) === JSON.stringify(tuned.evaluationIds) && Number.isFinite(a.score) && Number.isFinite(b.score);
+    const estimated = a.estimated || b.estimated;
+    return `<h3>${escapeHtml(pair.modelId)}</h3><div class="metric-grid grid"><div class="metric"><span>${estimated ? "Estimated correctness" : "Answer accuracy"} · base → tuned</span><strong>${measured ? percentage(a.score) + " → " + percentage(b.score) : "Needs review"}</strong></div><div class="metric"><span>Cut-off answers · base → tuned</span><strong>${cutoffs(base)} → ${cutoffs(tuned)}</strong></div><div class="metric"><span>Training artifact</span><strong>${pair.passed ? "Verified" : "Needs review"}</strong></div></div><p>${estimated ? "Task-specific local model grades are estimates, not verified ground-truth accuracy. Review uncertain grades before deployment." : measured ? "Accuracy uses the task metric recorded for this run." : "No complete, comparable correctness score was recorded. Run automatic evaluation or review the unresolved grades."}</p><strong>Base</strong>${gradingSummary(base)}<strong>Tuned</strong>${gradingSummary(tuned)}<details class="experiment-example"><summary>View detailed answers and diagnostics (${Math.min(5, base.samples?.length || 0)} of ${base.samples?.length || 0} samples)</summary><p>Word overlap: ${base.meanTokenOverlap ?? "n/a"} → ${tuned.meanTokenOverlap ?? "n/a"} (diagnostic only).</p><p>${escapeHtml(comparison.decisionReason || "")}</p>${recordedSamples({...base, samples:(base.samples || []).slice(0, 5)}, tuned)}</details>`;
+  }).join("");
 }
 
 function renderWorkflow(workflow) {
   window.currentWorkflow = workflow;
-  if (workflow.status === "failed" && workflow.error) {
+  if (workflow.status === "failed" && workflow.error && !workflow.state?.split_manifest_path) {
     const dataset = workflow.dataset?.name || workflow.state?.dataset?.name || "the selected dataset";
     app.innerHTML = shell("Dataset import failed", "ForgeTune could not read " + escapeHtml(dataset) + ".", "No model baseline or GPU training was started.", "<button class='button primary' id='replace-dataset'>Choose another dataset</button>") +
       steps(0) + "<section class='card body-pad'><h2>Fix this in step 1: Dataset</h2><div class='notice dataset-error'><strong>Import error</strong><br>" + escapeHtml(workflow.error) + "</div><p style='color:var(--muted);font-size:11px;line-height:1.65'>Use a current Hugging Face dataset that loads without a legacy script, or upload a CSV, JSONL, or Parquet file.</p></section></div>";
-    document.querySelector("#replace-dataset").onclick = () => { state.datasetError = workflow.error; location.hash = "#/workspace"; };
+    document.querySelector("#replace-dataset").onclick = () => updateDataset(workflow);
     return;
   }
   const pending = workflow.pendingAction;
@@ -317,19 +343,66 @@ function renderWorkflow(workflow) {
     const assessment = pending.assessment || {};
     const operations = (assessment.operations || []).map(item => "<li>" + escapeHtml(item.replaceAll("_", " ")) + "</li>").join("");
     action = "<section class='card body-pad' style='margin-top:16px'><h2>Blocker resolution review</h2><p>" + escapeHtml(pending.message || "Review the proposed data remediation.") + "</p><div class='notice dataset-error'>" + (assessment.blockers || []).map(item => escapeHtml(item.message)).join("<br>") + "</div>" + (operations ? "<h3 style='margin:16px 0 8px'>Proposed approved-only operations</h3><ul class='resolution-list'>" + operations + "</ul>" : "<p style='color:var(--muted);font-size:10px'>No safe automatic remediation is available for this blocker.</p>") + (assessment.canMaterializeAfterApproval ? "<button class='button primary' id='approve-remediation'>Approve cleanup and re-check →</button> " : "") + "<button class='button' id='replace-blocked-dataset'>Replace dataset</button> <button class='button danger' id='abort-workflow'>Abort</button></section>";
+  } else if (workflow.status === "waiting" && pending?.type === "task_review") {
+    action = `<form id="task-brief" class="card body-pad experiment-form"><h2>Define the task</h2><p>State what the model should do and how you will judge success. Small evaluation sets are exploratory.</p><label>Task description<textarea name="task_description" required maxlength="2000" placeholder="Classify support tickets into billing, delivery, or account"></textarea></label><label>Success metric / rubric<textarea name="success_metric" required maxlength="2000" placeholder="Label accuracy on unseen tickets; review errors per category"></textarea></label><label>Evaluation examples per phase (up to available rows)<input name="analysis_limit" type="number" min="1" max="200" value="${pending.analysisLimit || 50}" required></label><button class="button primary">Confirm task & test models</button> <button class="button" type="button" id="abort-workflow">Cancel</button></form>`;
   } else if (workflow.status === "waiting" && pending?.type === "data_review") {
-    action = "<section class='card body-pad' style='margin-top:16px'><h2>Dataset review required</h2><p>" + escapeHtml(pending.message || "Review the dataset before continuing.") + "</p><div class='notice'>" + (pending.findings || []).map(item => escapeHtml(item.message)).join("<br>") + "</div><button class='button danger' id='abort-workflow'>Abort workflow</button></section>";
+    action = datasetClarification(pending);
+  } else if (workflow.status === "waiting" && pending?.type === "prompt_review") {
+    action = workflowPromptReview(pending);
+  } else if (workflow.status === "waiting" && pending?.type === "dataset_ready") {
+    action = "<section class='card body-pad experiment-form'><h2>Dataset ready</h2><p>Analysis is saved. You can update the data or continue to baseline evaluation and a separate training approval.</p><button class='button primary' id='continue-dataset'>Test base model & prompts</button></section>";
   } else if (workflow.status === "waiting" && pending?.type === "retry_review") {
     action = "<section class='card body-pad' style='margin-top:16px'><h2>Retry decision</h2><p>" + escapeHtml(pending.reason || pending.message || "A candidate needs review.") + "</p><button class='button primary' id='retry-workflow'>Retry candidate</button> <button class='button' id='skip-workflow'>Skip candidate</button> <button class='button danger' id='abort-workflow'>Abort</button></section>";
   }
+  if (pending?.type === "plan_approval") {
+    action += "<section class='card body-pad'><h2>Baseline responses before training</h2>" + (pending.plan?.baselineResults || []).map(result => "<h3>" + escapeHtml(result.modelId || "Baseline unavailable") + "</h3>" + recordedSamples(result)).join("") + "</section>";
+  }
+  if (workflow.dataset?.sampleOnly) action = "<div class='notice'>Hugging Face sample: " + escapeHtml(workflow.dataset.importedRows) + " rows · subset " + escapeHtml(workflow.dataset.hubConfig || "default") + " · split " + escapeHtml(workflow.dataset.hubSplit || "train") + ". Analysis and training use this local sample, not the full Hub dataset.</div>" + action;
+  else if (workflow.dataset?.hubRevision) action = "<div class='notice'>Full Hugging Face split: " + escapeHtml(workflow.dataset.importedRows) + " rows · subset " + escapeHtml(workflow.dataset.hubConfig || "default") + " · split " + escapeHtml(workflow.dataset.hubSplit || "train") + ". All imported rows are available to the training/evaluation split. The quality audit samples up to 600 rows.</div>" + action;
+  action = datasetProfile(workflow.profile || workflow.state?.profile || pending?.profile) + action;
   const isDone = ["complete", "blocked", "cancelled", "failed"].includes(workflow.status);
-  const comparison = workflow.comparison ? "<section class='card body-pad' style='margin-top:16px'><h2>Final comparison</h2>" + workflowComparison(workflow.comparison) + "</section>" : "";
-  app.innerHTML = shell("LangGraph workflow", workflow.status === "waiting" ? "Your review is needed." : isDone ? "Workflow results are ready." : "ForgeTune is working.", workflow.status === "waiting" ? "The graph is checkpointed and waiting for your decision." : "Dataset profiling, baseline evaluation, training, and verification are running as a resumable workflow.", "<button class='button' id='back-config'>← Model setup</button>") +
-    steps(workflow.status === "complete" ? 3 : 1) + "<section class='card body-pad'><div class='section-head' style='padding:0 0 15px'><div><h2>Workflow " + escapeHtml(workflow.id) + "</h2><p>Goal: " + escapeHtml(workflow.goal || workflow.state?.goal || "balanced") + " · Candidates: " + (workflow.approved_plan?.candidateCount || workflow.state?.max_candidates || 3) + "</p></div><span class='pill " + (workflow.status === "complete" ? "complete" : "") + "'>" + escapeHtml(workflow.status) + "</span></div><div class='progress'><i style='width:" + (isDone ? 100 : workflow.status === "waiting" ? 45 : 18) + "%'></i></div><p style='color:var(--muted);font-size:11px;margin-top:12px'>" + (workflow.error ? escapeHtml(workflow.error) : workflow.status === "waiting" ? "No GPU work will start until this checkpoint is resolved." : isDone ? "All available workflow results have been persisted locally." : "The trainer will update this page automatically.") + "</p></section>" + action + comparison + "</div>";
-  document.querySelector("#back-config").onclick = () => location.hash = "#/configure";
+  const comparison = workflow.comparison ? "<section class='card body-pad' style='margin-top:16px'><h2>Evaluation summary</h2>" + workflowComparison(workflow.comparison) + (workflow.status === "complete" && workflow.comparison.pairs?.length ? "<button class='button' id='evaluate-accuracy'>Run automatic evaluation</button><p>Grade saved answers on all recorded unseen questions. Training is not repeated.</p>" : "") + (workflow.accuracyError ? "<p role='alert'>" + escapeHtml(workflow.accuracyError) + "</p>" : "") + "</section>" : "";
+  app.innerHTML = shell("LangGraph workflow", workflow.status === "waiting" ? "Your review is needed." : isDone ? "Workflow results are ready." : workflow.candidate_status === "verified" ? "Evaluating your fine-tune." : "ForgeTune is working.", workflow.status === "waiting" ? "The graph is checkpointed and waiting for your decision." : "Dataset analysis, prompt experiments, and optional fine-tuning are recorded in one resumable workflow.", "<button class='button' id='back-config'>← Datasets</button> <button class='button' id='update-dataset'>Update dataset</button>") +
+    steps(workflow.status === "complete" ? 3 : ["dataset_ready", "data_review", "blocker_resolution"].includes(pending?.type) ? 0 : pending?.type === "plan_approval" || Object.keys(workflow.training_runs || {}).length ? 2 : 1) + "<section class='card body-pad'><div class='section-head' style='padding:0 0 15px'><div><h2>" + escapeHtml(workflow.dataset?.displayName || workflow.state?.dataset?.displayName || "Dataset workflow") + "</h2><p>Task: " + escapeHtml(datasetTasks[workflow.profile?.classification?.task || workflow.state?.profile?.classification?.task] || "Dataset analysis") + " · Candidates: " + (workflow.approved_plan?.candidateCount || workflow.state?.max_candidates || 3) + "</p></div><span class='pill " + (workflow.status === "complete" ? "complete" : "") + "'>" + escapeHtml(workflow.status) + "</span></div><p style='color:var(--muted);font-size:11px;margin-top:12px'>" + (workflow.error ? escapeHtml(workflow.error) : workflow.status === "waiting" ? "No GPU work will start until this checkpoint is resolved." : isDone ? "All available workflow results have been persisted locally." : "The trainer will update this page automatically.") + "</p></section>" + action + comparison + (workflow.status === "complete" ? "<details class='card body-pad' style='margin-top:16px'><summary>Training, prompt/RAG checks & Compass models</summary>" + workflowTools(workflow) + "</details>" : workflowTools(workflow)) + "</div>";
+  bindWorkflowTools(workflow);
+  document.querySelector("#evaluate-accuracy")?.addEventListener("click", async event => {
+    event.currentTarget.disabled = true;
+    try {
+      const response = await fetch("/api/workflow/runs/" + workflow.id + "/evaluate", {method:"POST"});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "Automatic evaluator is unavailable.");
+      renderWorkflow({...workflow, status:"evaluating_accuracy", comparison:null});
+      pollWorkflow(workflow.id);
+      toast("Automatic evaluation started", "The local judge is grading saved base and tuned answers.");
+    } catch (error) { toast("Evaluation unavailable", error.message); renderWorkflow(workflow); }
+  });
+  document.querySelector("#back-config").onclick = () => location.hash = "#/workspace";
+  document.querySelector("#update-dataset").onclick = () => updateDataset(workflow);
+  document.querySelector("#continue-dataset")?.addEventListener("click", () => workflowAction(workflow.id, {action:"continue_training"}, "Starting model evaluation; training will require approval."));
+  document.querySelector("#task-brief")?.addEventListener("submit", event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    workflowAction(workflow.id, {task_description:form.get("task_description"), success_metric:form.get("success_metric"), analysis_limit:Number(form.get("analysis_limit"))}, "Task saved. Model evaluation is starting.");
+  });
+  document.querySelector("#auto-analyze")?.addEventListener("click", () => workflowAction(workflow.id, {action:"auto_analyze"}, "Testing prompts and diagnosing the next step automatically."));
+  const promptForm = document.querySelector("#workflow-prompt-form");
+  if (promptForm) promptForm.onsubmit = event => {
+    event.preventDefault();
+    workflowAction(workflow.id, {action:"try_prompt", instruction:document.querySelector("#workflow-instruction").value, context:document.querySelector("#workflow-context").value}, "Running on the same dataset development examples.");
+  };
+  const decisionForm = document.querySelector("#workflow-prompt-decision");
+  if (decisionForm) decisionForm.onsubmit = event => {
+    event.preventDefault();
+    workflowAction(workflow.id, {action:event.submitter.value, trial_index:Number(document.querySelector("#selected-trial").value)}, "Your prompt decision was submitted.");
+  };
+  const clarificationForm = document.querySelector("#dataset-clarification");
+  if (clarificationForm) clarificationForm.onsubmit = event => {
+    event.preventDefault();
+    workflowAction(workflow.id, {action:"accept_classification", task:document.querySelector("#confirmed-task").value, notes:document.querySelector("#clarification-notes").value}, "Your clarification was submitted.");
+  };
   document.querySelector("#approve-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"approve"}, "Training candidates have been queued."));
   document.querySelector("#approve-remediation")?.addEventListener("click", () => workflowAction(workflow.id, {action:"approve_remediation"}, "Approved cleanup is running; the dataset will be profiled again."));
-  document.querySelector("#replace-blocked-dataset")?.addEventListener("click", () => { state.datasetError = "Replace this dataset to resolve the workflow blocker."; location.hash = "#/workspace"; });
+  document.querySelector("#replace-blocked-dataset")?.addEventListener("click", () => updateDataset(workflow));
   document.querySelector("#retry-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"retry"}, "The candidate retry has been queued."));
   document.querySelector("#skip-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"skip_candidate"}, "Continuing with the remaining candidates."));
   document.querySelector("#abort-workflow")?.addEventListener("click", () => workflowAction(workflow.id, {action:"abort"}, "The workflow was stopped."));
@@ -340,7 +413,8 @@ async function workflowPage(id) {
     const response = await fetch("/api/workflow/runs/" + id);
     if (!response.ok) throw new Error();
     const workflow = await response.json();
-    renderWorkflow(workflow); pollWorkflow(id);
+    renderWorkflow(workflow);
+    if (!["waiting", "complete", "blocked", "cancelled", "failed"].includes(workflow.status)) pollWorkflow(id);
   } catch {
     app.innerHTML = shell("LangGraph workflow", "Workflow unavailable.", "Start the WSL trainer and open this workflow again.") + "</div>";
   }
@@ -426,7 +500,7 @@ function classificationEvaluation(run) {
 function evaluate(id) {
   const run = state.runs.find(item => item.id === id); if (!run || run.status !== "complete") return location.hash = "#/runs";
   app.innerHTML = shell("Evaluation & export", "See what changed, then take it with you.", "Results use the held-out 10% of your data. Review examples before deployment.", "<button class='button' id='back-run'>← Training run</button>") +
-    steps(3) + classificationEvaluation(run) + "<section class='card' style='margin-top:16px'><div class='metric-grid grid'><div class='metric'><span>Evaluation loss</span><strong>" + (Number.isFinite(run.loss) ? run.loss.toFixed(2) : "—") + "</strong></div><div class='metric'><span>Perplexity</span><strong>" + (Number.isFinite(run.perplexity) ? run.perplexity.toFixed(2) : "—") + "</strong></div><div class='metric'><span>Run dataset</span><strong style='font-size:14px'>" + escapeHtml(runDatasetLabel(run)) + "</strong></div></div></section><div class='grid columns' style='margin-top:16px'><section class='card comparison'><h2>Sample response comparison</h2><div class='answer'><strong>Base model</strong><br>Thank you for contacting us. Please provide additional details about your issue.</div><div class='answer tuned'><strong>Fine-tuned model</strong><br>I’m sorry your order arrived late. I can check its delivery status—please share the order number and postal code.</div></section><aside class='card body-pad'><h2>Export for Ollama</h2><p style='color:var(--muted);font-size:10px;line-height:1.6'>Download the adapter for reuse, or convert the merged model to GGUF before importing it into Ollama.</p><div class='export-actions'><button class='button' data-export='adapter'>Download adapter</button><button class='button primary' data-export='gguf'>Prepare GGUF export</button></div><pre class='code'>ollama create forge-support -f Modelfile\nollama run forge-support</pre></aside></div></div>";
+    steps(3) + classificationEvaluation(run) + "<section class='card' style='margin-top:16px'><div class='metric-grid grid'><div class='metric'><span>Evaluation loss</span><strong>" + (Number.isFinite(run.loss) ? run.loss.toFixed(2) : "—") + "</strong></div><div class='metric'><span>Perplexity</span><strong>" + (Number.isFinite(run.perplexity) ? run.perplexity.toFixed(2) : "—") + "</strong></div><div class='metric'><span>Run dataset</span><strong style='font-size:14px'>" + escapeHtml(runDatasetLabel(run)) + "</strong></div></div></section><div class='grid columns' style='margin-top:16px'><section class='card comparison'><h2>Response comparison</h2><p>Open the guided workflow comparison for recorded model outputs. No response samples were recorded for this legacy run.</p></section><aside class='card body-pad'><h2>Export for Ollama</h2><p style='color:var(--muted);font-size:10px;line-height:1.6'>Download the adapter for reuse, or convert the merged model to GGUF before importing it into Ollama.</p><div class='export-actions'><p>Browser downloads and GGUF conversion are not connected yet. Retrieve verified artifacts from the local training run directory.</p></div><pre class='code'>ollama create forge-support -f Modelfile\nollama run forge-support</pre></aside></div></div>";
   document.querySelector("#back-run").onclick = () => location.hash = "#/train/" + id;
   document.querySelectorAll("[data-export]").forEach(button => button.onclick = () => toast(button.dataset.export === "gguf" ? "GGUF conversion queued" : "Adapter package ready", button.dataset.export === "gguf" ? "The local trainer will merge and convert weights when it is online." : "Includes adapter_model.safetensors and adapter_config.json."));
 }
@@ -461,16 +535,33 @@ function catalog() {
   document.querySelectorAll("[data-pick]").forEach(button => button.onclick = () => { state.model = button.dataset.pick; if (model().size === "14B") state.method = "qlora"; location.hash = "#/configure"; });
 }
 
+function methodsPage() {
+  const methods = [
+    ["LoRA", "Implemented", "Trains a small adapter while the base model stays frozen. Use when the model fits without 4-bit loading.", "LoRAConfig + PEFT adapter"],
+    ["QLoRA", "Implemented", "Trains a small adapter over a 4-bit quantized base model. This is the default for 14B models and limited VRAM.", "BitsAndBytesConfig + PEFT adapter"],
+    ["Prompt + RAG", "Implemented", "Tests improved instructions and retrieved reference documents before training so the workflow can avoid unnecessary fine-tunes.", "Automatic prompt trials + local retrieval"],
+    ["Full fine-tuning", "Not implemented", "The trainer does not update every base-model weight. Use LoRA or QLoRA for the supported local workflow.", "Unavailable"],
+  ];
+  app.innerHTML = shell("Fine-tuning methods", "What ForgeTune can run", "The final workflow uses measured prompt, retrieval, and adapter results before recommending deployment.", "<button class='button' id='methods-back'>← Workspace</button>") +
+    "<section class='card body-pad'><div class='section-head'><div><h2>Implemented methods</h2><p>These labels reflect the actual local trainer and workflow code.</p></div><span class='pill complete'>Current</span></div><div class='catalog'>" +
+    methods.map(([name,status,description,detail]) => "<article class='card model'><span class='size'>" + status + "</span><h2 style='margin-top:7px'>" + escapeHtml(name) + "</h2><p>" + escapeHtml(description) + "</p><dl><div><dt>Implementation</dt><dd>" + escapeHtml(detail) + "</dd></div></dl></article>").join("") +
+    "</div></section></div>";
+  document.querySelector("#methods-back").onclick = () => location.hash = "#/workspace";
+}
 function render() {
+  clearTimeout(qualityTimer);
   setNav(); const [page, id] = route().split("/");
-  if (page === "configure") configure();
+  if (page === "quality") qualityPage(id);
+  else if (page === "quality-evaluations") qualityEvaluations(id);
+  else if (page === "configure") configure();
   else if (page === "workflow") workflowPage(id);
   else if (page === "train") train(id);
   else if (page === "evaluate") evaluate(id);
   else if (page === "runs" && id) runDetails(id);
   else if (page === "runs") runs();
   else if (page === "models") catalog();
-  else workspace();
+  else if (page === "methods") methodsPage();
+  else datasetStudio();
   window.scrollTo({top:0, behavior:"smooth"});
 }
 
@@ -478,7 +569,7 @@ async function loadHardware() {
   try {
     const response = await fetch("/api/hardware"), hardware = await response.json();
     document.querySelector("#gpu-name").textContent = hardware.name || "NVIDIA GPU";
-    document.querySelector("#gpu-memory").textContent = (hardware.memoryGb || 24) + " GB VRAM detected";
+    document.querySelector("#gpu-memory").textContent = hardware.memoryGb ? hardware.memoryGb + " GB VRAM detected" : "GPU memory unavailable";
     document.querySelector("#trainer-status").textContent = hardware.trainerOnline ? "Trainer connected" : "Trainer not connected";
     document.querySelector(".status-line i").style.background = hardware.trainerOnline ? "var(--cyan)" : "var(--amber)";
   } catch { document.querySelector("#gpu-name").textContent = "NVIDIA GPU"; }

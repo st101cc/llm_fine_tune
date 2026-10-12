@@ -1,0 +1,24 @@
+const assert=require("node:assert/strict");
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE || "playwright");
+(async()=>{const browser=await chromium.launch({channel:"msedge",headless:true});try{
+ const page=await browser.newPage();
+ const errors=[];page.on("pageerror",e=>errors.push(e.message));
+ await page.goto("http://127.0.0.1:4173/#/workflow/ce968a6a-eb11-4bc7-92c4-13e01494fe50");
+ await page.getByRole("heading",{name:"Evaluation summary",exact:true}).waitFor();
+ assert(await page.getByText("Improvement not established",{exact:true}).isVisible());
+ assert(await page.getByRole("button",{name:"Run automatic evaluation",exact:true}).isVisible());
+ const details=page.getByText("View detailed answers and diagnostics (5 of 20 samples)",{exact:true});
+ assert(await details.isVisible());
+ assert.equal(await page.getByRole("heading",{name:"Compare with Compass",exact:true}).isVisible(),false);
+ assert.equal(await page.getByText("Evaluation row 1",{exact:true}).isVisible(),false);
+ await details.click();
+ assert.equal(await details.locator("..").locator("details.experiment-example").count(),5);
+ assert(await page.getByText("20 unseen questions",{exact:false}).isVisible());
+ assert(await page.getByText("Evaluation row 1",{exact:true}).isVisible());
+ await page.getByText("Training, prompt/RAG checks & Compass models",{exact:true}).click();
+ assert(await page.getByRole("button",{name:"Load available models",exact:true}).isVisible());
+ await page.setViewportSize({width:390,height:844});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ assert.deepEqual(errors,[]);
+ console.log("Evaluation summary passed: verdict visible, details collapsed, tools accessible, mobile layout.");
+}finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

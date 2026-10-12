@@ -8,9 +8,10 @@ langgraph-checkpoint-sqlite>=2.0
 aiosqlite>=0.20
 pytest>=8.0
 datasets>=2.20
-transformers>=4.45
-trl>=0.11
+transformers>=4.55.4,<5
+trl>=0.22.2,<0.23
 peft>=0.12
 accelerate>=0.34
 bitsandbytes>=0.43
 safetensors>=0.4
+OpenCC==1.4.2

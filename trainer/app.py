@@ -3,19 +3,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from advisor import baseline_compare, cloud_clarify, cloud_status, connection_test, load_source, local_profile, rank_candidates
-from graph import WorkflowServices, build_workflow_graph
+from graph import WorkflowServices, build_workflow_graph, isolated_inference, accuracy_agent_review, _compare_results
+from evaluator import DEFAULT_MODEL, evaluate_results
 from langgraph.types import Command
 
 try:
@@ -26,7 +30,8 @@ from langgraph.checkpoint.memory import MemorySaver
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
-DATA_ROOT = ROOT / "data"
+load_dotenv(Path.cwd() / ".env")
+DATA_ROOT = Path(os.environ.get("FORGETUNE_DATA_ROOT", str(ROOT / "data")))
 RUNS_ROOT = DATA_ROOT / "runs"
 DATASETS_ROOT = DATA_ROOT / "datasets"
 WORKFLOWS_ROOT = DATA_ROOT / "workflows"
@@ -35,9 +40,14 @@ RUNS_ROOT.mkdir(parents=True, exist_ok=True)
 DATASETS_ROOT.mkdir(parents=True, exist_ok=True)
 WORKFLOWS_ROOT.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="ForgeTune Local Trainer", version="0.1.0")
+from quality_api import install_quality_routes
+install_quality_routes(app, lambda: DATA_ROOT)
 queue_lock = asyncio.Lock()
 active_processes: dict[str, asyncio.subprocess.Process] = {}
+active_quality_training: dict[str, threading.Event] = {}
 active_workflows: dict[str, asyncio.Task] = {}
+active_evaluations: dict[str, asyncio.Task] = {}
+active_imports: dict[str, tuple[asyncio.Task, threading.Event]] = {}
 
 
 class DatasetRequest(BaseModel):
@@ -45,6 +55,14 @@ class DatasetRequest(BaseModel):
     name: str = Field(min_length=1)
     extension: str | None = None
     split: str = "train"
+    displayName: str | None = Field(default=None, max_length=255)
+    sourceUrl: str | None = Field(default=None, max_length=2048)
+    importedRows: int | None = None
+    hubConfig: str | None = None
+    hubSplit: str | None = None
+    hubRevision: str | None = None
+    sampleOnly: bool = False
+    qualityVersionId: str | None = None
 
 
 class Hyperparameters(BaseModel):
@@ -60,6 +78,7 @@ class Hyperparameters(BaseModel):
 class RunRequest(BaseModel):
     dataset: DatasetRequest
     base_model: str
+    base_model_revision: str | None = Field(default=None, pattern='^[a-f0-9]{40}$')
     parameter_method: Literal["lora", "qlora"]
     hyperparameters: Hyperparameters = Field(default_factory=Hyperparameters)
     test_dataset: DatasetRequest | None = None
@@ -73,6 +92,14 @@ class RunRequest(BaseModel):
 
 
 class WorkflowRequest(BaseModel):
+    analysis_limit: int = Field(default=50, ge=1, le=200)
+    task_description: str = Field(default="", max_length=2000)
+    success_metric: str = Field(default="", max_length=2000)
+    gpu_hourly_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    knowledge_documents: list[dict] = Field(default_factory=list, max_length=50)
+    auto_analysis: bool = True
+    analysis_only: bool = False
+    previous_workflow_id: uuid.UUID | None = None
     dataset: DatasetRequest
     goal: Literal["speed", "balanced", "quality"] = "balanced"
     cloud_assist: bool = False
@@ -96,6 +123,51 @@ class BaselineRequest(BaseModel):
     dataset: DatasetRequest
     goal: Literal["speed", "balanced", "quality"] = "balanced"
     candidate_ids: list[str] = Field(default_factory=list, max_length=3)
+
+
+class ExperimentExample(BaseModel):
+    prompt: str = Field(min_length=1, max_length=4000)
+    completion: str = Field(min_length=1, max_length=4000)
+
+
+class ExperimentRequest(BaseModel):
+    use_case: str = Field(min_length=1, max_length=2000)
+    success_criteria: str = Field(min_length=1, max_length=2000)
+    model_id: str = Field(min_length=1, max_length=200)
+    instruction: str = Field(default="", max_length=4000)
+    context: str = Field(default="", max_length=8000)
+    examples: list[ExperimentExample] = Field(min_length=1, max_length=10)
+
+
+@app.post("/experiments")
+async def run_experiment(request: ExperimentRequest) -> dict:
+    from advisor import MODELS
+    from datasets import Dataset
+    model = next((item for item in MODELS if item["id"] == request.model_id), None)
+    if model is None:
+        raise HTTPException(422, "Choose a model from the catalog.")
+    if not request.use_case.strip() or not request.success_criteria.strip() or any(not item.prompt.strip() or not item.completion.strip() for item in request.examples):
+        raise HTTPException(422, "Describe the task, success criteria, and each input and ideal answer.")
+    if queue_lock.locked() or active_workflows:
+        raise HTTPException(409, "Wait for the current GPU workflow to finish.")
+    if gpu_status()["memoryGb"] < model["vram"]:
+        raise HTTPException(422, "The selected model exceeds available GPU capacity, or no GPU is connected.")
+    instruction = request.instruction
+    if request.context.strip():
+        instruction += "\n\nReference context:\n" + request.context
+    async with queue_lock:
+        try:
+            results = await asyncio.to_thread(baseline_compare, Dataset.from_list([item.model_dump() for item in request.examples]), [{"model": model, "method": "qlora"}], len(request.examples), instruction=instruction)
+        except Exception as error:
+            raise HTTPException(503, str(error)[:300]) from error
+    result = results[0]
+    if result.get("status") != "complete":
+        raise HTTPException(503, result.get("message", "Local inference was unavailable."))
+    record = {"id": str(uuid.uuid4()), "createdAt": datetime.now(timezone.utc).isoformat(), "request": request.model_dump(), "result": result}
+    directory = DATA_ROOT / "experiments"
+    directory.mkdir(exist_ok=True)
+    (directory / (record["id"] + ".json")).write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return record
 
 
 def run_path(run_id: str) -> Path:
@@ -174,6 +246,148 @@ async def upload_dataset(file: UploadFile = File(...)) -> dict:
     }
 
 
+class HuggingFaceRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+    configuration: str | None = Field(default=None, max_length=200)
+    split: str = Field(default="train", min_length=1, max_length=100)
+    max_rows: int = Field(default=600, ge=30, le=10000)
+    mode: Literal["sample", "full", "all"] = "sample"
+
+
+def write_import(record: dict) -> None:
+    directory = DATASETS_ROOT / ".imports"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (str(uuid.UUID(record["id"])) + ".json")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def read_import(import_id: uuid.UUID) -> dict:
+    path = DATASETS_ROOT / ".imports" / (str(import_id) + ".json")
+    if not path.exists():
+        raise HTTPException(404, "Dataset import not found.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+async def execute_import(record: dict, request: HuggingFaceRequest, stop: threading.Event) -> None:
+    from hf_import import import_huggingface, import_all_subsets
+    def progress(values):
+        record.update(values)
+        write_import(record)
+    def run():
+        try:
+            if request.mode == "all":
+                record["result"] = import_all_subsets(request.url, request.split, DATASETS_ROOT,
+                                                    progress=progress, cancelled=stop.is_set, import_id=record["id"])
+            else:
+                record["result"] = import_huggingface(request.url, request.configuration, request.split, None, DATASETS_ROOT,
+                                                     progress=progress, cancelled=stop.is_set, import_id=record["id"])
+            record["status"] = "needs_configuration" if record["result"].get("requiresConfiguration") else "complete"
+        except InterruptedError as error:
+            record.update(status="cancelled", error=str(error))
+        except Exception as error:
+            record.update(status="failed", error="Hugging Face import failed: " + str(error)[:500])
+        record["completedAt"] = datetime.now(timezone.utc).isoformat()
+        write_import(record)
+    try:
+        await asyncio.to_thread(run)
+    finally:
+        active_imports.pop(record["id"], None)
+
+
+@app.get("/datasets/imports/{import_id}")
+async def get_dataset_import(import_id: uuid.UUID) -> dict:
+    record = read_import(import_id)
+    active = active_imports.get(str(import_id))
+    if active and active[1].is_set() and record["status"] == "running":
+        return {**record, "status": "cancelling"}
+    return record
+
+
+@app.post("/datasets/imports/{import_id}/cancel", status_code=202)
+async def cancel_dataset_import(import_id: uuid.UUID) -> dict:
+    record = read_import(import_id)
+    active = active_imports.get(str(import_id))
+    if active and record["status"] == "running":
+        active[1].set()
+        return {**record, "status": "cancelling"}
+    return record
+
+
+@app.post("/datasets/huggingface")
+async def huggingface_dataset(request: HuggingFaceRequest) -> dict:
+    from hf_import import import_huggingface
+    if request.mode in {"full", "all"}:
+        from hf_import import dataset_id
+        try:
+            dataset_id(request.url)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        # ponytail: one full import per trainer process; use a durable queue for multi-worker deployments.
+        if active_imports:
+            raise HTTPException(409, "Another full dataset import is running. Wait for it or cancel it first.")
+        record = {"id": str(uuid.uuid4()), "status": "running", "createdAt": datetime.now(timezone.utc).isoformat(),
+                  "request": request.model_dump(), "importedRows": 0, "importedBytes": 0, "totalRows": None}
+        write_import(record)
+        stop = threading.Event()
+        active_imports[record["id"]] = (asyncio.create_task(execute_import(record, request, stop)), stop)
+        return JSONResponse(record, status_code=202)
+    try:
+        return await asyncio.to_thread(import_huggingface, request.url, request.configuration, request.split, request.max_rows, DATASETS_ROOT)
+    except Exception as error:
+        raise HTTPException(422, "Hugging Face import failed: " + str(error)[:500]) from error
+
+
+class SubsetSelectionRequest(BaseModel):
+    configurations: list[str | None] = Field(min_length=1)
+    previous_workflow_id: uuid.UUID | None = None
+    cloud_assist: bool = False
+
+
+@app.post("/datasets/imports/{import_id}/select")
+async def select_import_subsets(import_id: uuid.UUID, request: SubsetSelectionRequest) -> dict:
+    record = read_import(import_id)
+    if record["status"] != "complete" or not record.get("result", {}).get("allSubsets"):
+        raise HTTPException(409, "Wait until all subset audits finish before selecting training data.")
+    entries = {item["configuration"]:item for item in record["result"]["subsets"]}
+    selected = request.configurations
+    if len(set(selected)) != len(selected) or any(name not in entries or entries[name]["status"] != "analyzed" for name in selected):
+        raise HTTPException(422, "Choose distinct subsets with completed analysis.")
+    if request.previous_workflow_id:
+        read_workflow(str(request.previous_workflow_id))
+    links = record.setdefault("selectedWorkflows", {})
+    workflows = []
+    for name in selected:
+        key = json.dumps(name)
+        if key not in links:
+            workflow = await create_workflow(WorkflowRequest(dataset=DatasetRequest(**entries[name]["dataset"]),
+                analysis_only=True, auto_analysis=False, candidate_limit=1, cloud_assist=request.cloud_assist,
+                previous_workflow_id=request.previous_workflow_id))
+            links[key] = workflow["id"]
+            write_import(record)
+        workflows.append({"configuration":name, "id":links[key]})
+    return {"workflows":workflows}
+
+
+class GitHubDatasetRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+@app.post("/datasets/github")
+async def github_dataset(request: GitHubDatasetRequest) -> dict:
+    from github_import import import_github_dataset
+    import urllib.error
+    try:
+        return await asyncio.to_thread(import_github_dataset, request.url, DATASETS_ROOT)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except urllib.error.HTTPError as error:
+        raise HTTPException(422, "GitHub could not provide this file. Check that the file and branch exist and the repository is public. Redirects and private repositories are not supported.") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise HTTPException(503, "GitHub is unreachable or the download timed out. Try again.") from error
+
+
 @app.get("/advisor/status")
 async def advisor_status() -> dict:
     return cloud_status()
@@ -205,7 +419,7 @@ async def analyze_dataset(request: AnalysisRequest) -> dict:
                 "source": "cloud-assisted",
                 "explanation": cloud.get("explanation", ""),
             }
-    candidates = rank_candidates(analysis, request.goal, gpu_status()["memoryGb"] or 24)
+    candidates = rank_candidates(analysis, request.goal, gpu_status()["memoryGb"])
     blockers = [item for item in analysis["findings"] if item["severity"] == "blocker"]
     recommended = next((item for item in candidates if not item["rejected"]), None)
     return {
@@ -246,17 +460,33 @@ async def analyze_baseline(request: BaselineRequest) -> dict:
 async def run_training(run_id: str) -> None:
     async with queue_lock:
         record = read_run(run_id)
+        if record.get('status') in ('cancelled', 'complete', 'failed'):
+            return
         record.update({"status": "running", "startedAt": datetime.now(timezone.utc).isoformat(), "framework": "Transformers + TRL + PEFT"})
         write_run(record)
-        command = [sys.executable, str(ROOT / "train.py"), "--run-dir", str(run_path(run_id).parent)]
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        active_processes[run_id] = process
-        log_path = run_path(run_id).parent / "training.log"
-        with log_path.open("w", encoding="utf-8") as log:
-            while line := await process.stdout.readline():
-                log.write(line.decode(errors="replace"))
-        code = await process.wait()
-        active_processes.pop(run_id, None)
+        command = [sys.executable, "-u", str(ROOT / "train.py"), "--run-dir", str(run_path(run_id).parent)]
+        if record.get('qualityProvenance'):
+            from quality_pilot import run_with_pilot_budget
+            stop = threading.Event()
+            active_quality_training[run_id] = stop
+            try:
+                budget = await asyncio.to_thread(run_with_pilot_budget, DATA_ROOT, [command], cancelled=stop.is_set, log_dir=run_path(run_id).parent)
+                record = read_run(run_id)
+                record.update(qualityBudget=budget, message=budget.get('message'))
+                write_run(record)
+                code = 0 if budget['status'] == 'complete' else 1
+            finally:
+                active_quality_training.pop(run_id, None)
+        else:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            active_processes[run_id] = process
+            log_path = run_path(run_id).parent / "training.log"
+            with log_path.open("w", encoding="utf-8") as log:
+                while line := await process.stdout.readline():
+                    log.write(line.decode(errors="replace"))
+                    log.flush()
+            code = await process.wait()
+            active_processes.pop(run_id, None)
         record = read_run(run_id)
         if record["status"] == "cancelled":
             return
@@ -266,6 +496,7 @@ async def run_training(run_id: str) -> None:
             if metrics_path.exists():
                 metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
                 record["metrics"] = {
+                    **metrics,
                     "eval_loss": metrics.get("eval_loss"),
                     "perplexity": round(float(__import__("math").exp(metrics["eval_loss"])), 3) if metrics.get("eval_loss") is not None else None,
                     "classification": metrics.get("classification"),
@@ -277,8 +508,23 @@ async def run_training(run_id: str) -> None:
 
 @app.post("/runs", status_code=202)
 async def create_run(request: RunRequest) -> dict:
+    from quality_training import dataset_provenance
+    try:
+        provenance = dataset_provenance(DATA_ROOT, request.dataset.model_dump())
+    except (ValueError, KeyError, OSError) as error:
+        raise HTTPException(422, str(error)) from error
     if "14B" in request.base_model and request.parameter_method != "qlora":
         raise HTTPException(422, "14B models require QLoRA on the configured 24 GB GPU.")
+    quality_model = None
+    if provenance:
+        from quality_models import TAIDE_ID, get_model_status
+        if request.base_model != TAIDE_ID:
+            raise HTTPException(422, 'This quality pilot uses TAIDE; another model will not be substituted.')
+        if not request.base_model_revision:
+            raise HTTPException(422, 'Quality training requires the approved immutable model revision.')
+        quality_model = get_model_status(revision=request.base_model_revision)
+        if quality_model['status'] != 'ready':
+            raise HTTPException(422, quality_model['message'])
     if request.idempotency_key:
         for path in RUNS_ROOT.glob("*/run.json"):
             try:
@@ -302,6 +548,8 @@ async def create_run(request: RunRequest) -> dict:
         "idempotencyKey": request.idempotency_key,
         "splitManifestId": request.split_manifest_id,
         "splitManifestPath": request.split_manifest_path,
+        "qualityProvenance": provenance,
+        "qualityModel": quality_model,
     }
     write_run(record)
     asyncio.create_task(run_training(run_id))
@@ -333,6 +581,7 @@ async def submit_workflow_training(spec: dict) -> dict:
     request = RunRequest(
         dataset=DatasetRequest(**spec["dataset"]),
         base_model=spec["baseModel"],
+        base_model_revision=spec.get('baseModelRevision'),
         parameter_method=spec["parameterMethod"],
         hyperparameters=Hyperparameters(**spec["hyperparameters"]),
         test_dataset=DatasetRequest(**test_dataset) if test_dataset else None,
@@ -361,6 +610,8 @@ workflow_services = WorkflowServices(
     submit_training=submit_workflow_training,
     get_training=get_workflow_training,
     training_dir=workflow_training_dir,
+    gpu_lock=queue_lock,
+    isolate_inference=True,
 )
 workflow_graph = build_workflow_graph(workflow_services, MemorySaver())
 workflow_checkpointer_context = None
@@ -370,6 +621,15 @@ workflow_checkpointer_context = None
 async def initialize_workflow_checkpointer() -> None:
     """Use durable async SQLite persistence when the trainer is fully installed."""
     global workflow_graph, workflow_checkpointer_context
+    for path in (DATASETS_ROOT / ".imports").glob("*.json"):
+        import_id = uuid.UUID(path.stem)
+        record = read_import(import_id)
+        if record["status"] == "running":
+            (DATASETS_ROOT / (str(import_id) + ".jsonl.partial")).unlink(missing_ok=True)
+            for partial in (DATASETS_ROOT / str(import_id)).glob("*.jsonl.partial"):
+                partial.unlink()
+            record.update(status="interrupted", error="Trainer restarted before this import finished. Start the import again.")
+            write_import(record)
     if AsyncSqliteSaver is None:
         return
     try:
@@ -382,6 +642,11 @@ async def initialize_workflow_checkpointer() -> None:
 
 @app.on_event("shutdown")
 async def close_workflow_checkpointer() -> None:
+    imports = list(active_imports.values())
+    for task, stop in imports:
+        stop.set()
+    if imports:
+        await asyncio.gather(*(task for task, stop in imports), return_exceptions=True)
     if workflow_checkpointer_context is not None:
         await workflow_checkpointer_context.__aexit__(None, None, None)
 
@@ -437,9 +702,34 @@ async def execute_workflow(workflow_id: str, resume_response: dict | None = None
 
 @app.post("/workflow/runs", status_code=202)
 async def create_workflow(request: WorkflowRequest) -> dict:
+    from quality_training import dataset_provenance
+    try:
+        provenance = dataset_provenance(DATA_ROOT, request.dataset.model_dump())
+    except (ValueError, KeyError, OSError) as error:
+        raise HTTPException(422, str(error)) from error
+    if provenance and request.cloud_assist:
+        raise HTTPException(422, "Quality workflows are local-only; cloud assistance is unavailable.")
+    if request.knowledge_documents:
+        from quality_probe import validate_documents
+        try:
+            request.knowledge_documents = validate_documents(request.knowledge_documents)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+    if request.previous_workflow_id is not None:
+        read_workflow(str(request.previous_workflow_id))
     workflow_id = str(uuid.uuid4())
     initial_state = {
         "workflow_id": workflow_id,
+        "benchmark_selection": not bool(provenance),
+        "quality_provenance": provenance,
+        "benchmark_prices": {"hourlyCostUsd":request.gpu_hourly_cost_usd},
+        "knowledge_documents": request.knowledge_documents,
+        "analysis_limit": request.analysis_limit,
+        "task_description": request.task_description,
+        "success_metric": request.success_metric,
+        "analysis_only": request.analysis_only,
+        "auto_analysis": request.auto_analysis,
+        "previous_workflow_id": str(request.previous_workflow_id) if request.previous_workflow_id else None,
         "dataset": request.dataset.model_dump(),
         "test_dataset": request.test_dataset.model_dump() if request.test_dataset else None,
         "goal": request.goal,
@@ -459,17 +749,110 @@ async def create_workflow(request: WorkflowRequest) -> dict:
     return record
 
 
+def public_workflow(record):
+    if record.get("status") == "complete":
+        return record
+    hidden = {"baseline_results", "evaluation_results", "comparison"}
+    return {**{k:v for k,v in record.items() if k not in hidden},
+            "state":{k:v for k,v in record.get("state", {}).items() if k not in hidden}}
+
+
 @app.get("/workflow/runs")
 async def list_workflows() -> list[dict]:
-    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(WORKFLOWS_ROOT.glob("*/workflow.json"), reverse=True)]
+    return [public_workflow(json.loads(path.read_text(encoding="utf-8"))) for path in sorted(WORKFLOWS_ROOT.glob("*/workflow.json"), reverse=True)]
 
 
 @app.get("/workflow/runs/{workflow_id}")
 async def get_workflow(workflow_id: str) -> dict:
     record = read_workflow(workflow_id)
-    # Record status is authoritative; state may still contain the initial status
-    # when a graph invocation fails before it can checkpoint an update.
-    return {**record.get("state", {}), **record}
+    state = record.get("state", {})
+    if workflow_id in active_workflows:
+        snapshot = await workflow_graph.aget_state({"configurable":{"thread_id":workflow_id}})
+        state = {**state, **getattr(snapshot, "values", {})}
+    training_records = []
+    for path in RUNS_ROOT.glob("*/run.json"):
+        run = json.loads(path.read_text(encoding="utf-8"))
+        if run.get("workflowId") == workflow_id:
+            context_path = path.parent / "training-context.json"
+            if context_path.exists():
+                run["trainingContext"] = json.loads(context_path.read_text(encoding="utf-8"))
+            training_records.append(run)
+    return public_workflow({**state, **record, "state":state, "trainingRecords":training_records})
+
+
+@app.get("/workflow/runs/{workflow_id}/comparison-inputs")
+async def workflow_comparison_inputs(workflow_id: uuid.UUID, phase: Literal["development", "heldout"] = "development", limit: int = Query(default=3, ge=1, le=9), allow_sensitive_data: bool = Query(default=False)) -> dict:
+    from advisor import evaluation_messages
+    record = await get_workflow(str(workflow_id))
+    state = record["state"]
+    if phase == "heldout" and record["status"] != "complete":
+        raise HTTPException(409, "Final test questions remain sealed until this workflow completes.")
+    privacy = state.get("privacy_review") or {}
+    if privacy.get("status") == "review" and not allow_sensitive_data:
+        raise HTTPException(409, "Privacy agent flagged sensitive values in the selected examples. Review the dataset or explicitly confirm sending them to a hosted model.")
+    if not state.get("split_manifest_path"):
+        raise HTTPException(409, "Wait for dataset analysis to create the split.")
+    manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
+    ref = manifest["evalDataset"] if phase == "heldout" else state["dataset"]
+    dataset = load_source(ref["source"], ref["name"], ref.get("extension"))
+    indices = (manifest.get("evaluationIds", manifest.get("evalIndices", [])) if phase == "heldout" else manifest.get("developmentIndices", []))[:limit]
+    instruction = state.get("model_benchmark",{}).get("instruction") if state.get("status")=="awaiting_model_selection" else state.get("selected_instruction")
+    instruction = instruction or "Answer accurately and concisely. Follow the requested language and output format exactly. Ask a brief clarification if essential information is ambiguous."
+    cases = []
+    for index in indices:
+        messages, _ = evaluation_messages(dataset[index], instruction)
+        cases.append({"rowId":index, "messages":[m for m in messages if not (m["role"] == "system" and not m["content"].strip())]})
+    return {"workflowId":str(workflow_id), "maxOutputTokens":256, "phase":phase, "splitManifestId":state.get("split_manifest_id"), "datasetFingerprint":manifest.get("datasetFingerprint"), "instruction":instruction, "privacyReview":privacy, "cases":cases}
+
+
+async def regrade_workflow(record: dict) -> None:
+    """Add grades to saved final answers; never generate answers or train again."""
+    state = record["state"]
+    if state.get('quality_provenance'):
+        return  # Quality cases require the independent, budgeted evaluation API.
+    try:
+        manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
+        ref = manifest["evalDataset"]
+        dataset = await asyncio.to_thread(load_source, ref["source"], ref["name"], ref.get("extension"))
+        base, tuned = state["baseline_results"], state["evaluation_results"]
+        state["evaluator_model"] = state.get("evaluator_model") or os.environ.get("EVALUATOR_MODEL") or DEFAULT_MODEL
+        async with queue_lock:
+            results = await asyncio.to_thread(isolated_inference, evaluate_results, dataset, base + tuned,
+                task=state.get("profile", {}).get("classification", {}).get("task", "assistant"),
+                model_id=state["evaluator_model"], instruction=state.get("selected_instruction", ""),
+                knowledge_documents=state.get("knowledge_documents") if state.get("selected_uses_rag") else None)
+        state.update(baseline_results=results[:len(base)], evaluation_results=results[len(base):], accuracy_review=accuracy_agent_review(results))
+        state["comparison"] = _compare_results(state)
+    except Exception:
+        record["accuracyError"] = "Automatic evaluation failed. Existing answers are preserved; check backend availability and the cached judge model."
+    finally:
+        record["status"] = "complete"
+        write_workflow(record)
+        active_evaluations.pop(record["id"], None)
+
+
+@app.post("/workflow/runs/{workflow_id}/evaluate", status_code=202)
+async def evaluate_workflow(workflow_id: uuid.UUID) -> dict:
+    key = str(workflow_id)
+    if read_workflow(key).get('state', {}).get('quality_provenance'):
+        raise HTTPException(422, 'Quality workflows cannot use the legacy judge. Use independent quality evaluation; free-form correctness needs review.')
+    if key in active_evaluations:
+        return {"id": key, "status": "evaluating_accuracy"}
+    record = read_workflow(key)
+    state = record.get("state", {})
+    if record.get("status") not in {"complete", "evaluating_accuracy"} or not state.get("evaluation_results") or not state.get("baseline_results"):
+        raise HTTPException(409, "A completed workflow with saved base and tuned answers is required.")
+    if active_workflows or active_evaluations or queue_lock.locked():
+        raise HTTPException(409, "Wait for the current GPU job to finish.")
+    # Preserve the original comparison once before adding grades to historical runs.
+    backup = workflow_path(key).with_name("before-automatic-evaluation.json")
+    if not backup.exists():
+        backup.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    record["status"] = "evaluating_accuracy"
+    record.pop("accuracyError", None)
+    write_workflow(record)
+    active_evaluations[key] = asyncio.create_task(regrade_workflow(record))
+    return {"id": key, "status": "evaluating_accuracy"}
 
 
 @app.post("/workflow/runs/{workflow_id}/resume", status_code=202)
@@ -482,7 +865,7 @@ async def resume_workflow(workflow_id: str, request: WorkflowResumeRequest) -> d
     record["status"] = "queued"
     write_workflow(record)
     active_workflows[workflow_id] = asyncio.create_task(execute_workflow(workflow_id, request.response))
-    return record
+    return public_workflow(record)
 
 
 @app.get("/runs")
@@ -504,6 +887,8 @@ async def get_logs(run_id: str) -> dict:
 @app.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> dict:
     record = read_run(run_id)
+    if run_id in active_quality_training:
+        active_quality_training[run_id].set()
     process = active_processes.get(run_id)
     if process:
         process.terminate()

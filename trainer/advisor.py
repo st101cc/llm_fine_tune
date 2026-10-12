@@ -1,10 +1,12 @@
 """Local-first dataset profiling and optional OpenAI-compatible cloud clarification."""
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
 import os
+import random
 import re
 import time
 import urllib.error
@@ -24,9 +26,9 @@ MODELS = [
 ]
 EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 PHONE = re.compile(r"(?<!\w)(?:\+?\d[\d ()-]{7,}\d)(?!\w)")
-SECRET = re.compile(r"\b(?:sk|api|key|token|secret)[_-]?[A-Za-z0-9]{12,}\b", re.I)
+SECRET = re.compile(r"\b(?:sk|api|key|token|secret)[_-]?[A-Za-z0-9_-]{12,}\b", re.I)
 CREDENTIAL_URL = re.compile(r"https?://[^\s/@:]+:[^\s/@]+@", re.I)
-CODE = re.compile(r"\b(?:def|class|function|const|let|import|SELECT|FROM|return)\b|[{};]{2,}", re.I)
+CODE = re.compile(r"```(?:python|javascript|typescript|java|cpp|sql|bash)\b|^\s*(?:def\s+\w+\s*\(|class\s+\w+[^\n]*:|from\s+[\w.]+\s+import\s|import\s+[\w.]+\s*$|(?:const|let|var)\s+\w+\s*=|function\s+\w+\s*\(|SELECT\s+.+\s+FROM\s+)", re.I | re.M)
 
 
 def load_source(source: str, name: str, extension: str | None = None) -> Dataset:
@@ -54,6 +56,47 @@ def redact(text: str) -> tuple[str, int]:
     text = SECRET.sub("[SECRET]", text)
     text = CREDENTIAL_URL.sub("https://[CREDENTIALS]@", text)
     return text, int(text != before)
+
+
+def input_key(row):
+    """Group repeated inputs even when their target answers differ."""
+    value = row.get("prompt", row.get("text", ""))
+    if isinstance(row.get("messages"), list):
+        messages = row["messages"]
+        value = json.dumps(messages[:-1] if messages and messages[-1].get("role") == "assistant" else messages, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(" ".join(str(value).casefold().split()).encode()).hexdigest()
+
+
+def privacy_scan(rows: list[dict[str, Any]], limit: int = 600) -> dict[str, Any]:
+    """Scan a bounded sample for values that should not leave the local app."""
+    patterns = {
+        "email": EMAIL,
+        "phone": PHONE,
+        "secret": SECRET,
+        "credentialUrl": CREDENTIAL_URL,
+    }
+    matches = {name: 0 for name in patterns}
+    flagged_rows: list[int] = []
+    sampled = list(rows)[:limit]
+    for row_id, row in enumerate(sampled):
+        text = content_for_row(row)
+        flagged = False
+        for name, pattern in patterns.items():
+            count = len(pattern.findall(text))
+            matches[name] += count
+            flagged = flagged or count > 0
+        if flagged:
+            flagged_rows.append(row_id)
+    flagged_count = len(flagged_rows)
+    return {
+        "status": "review" if flagged_count else "clear",
+        "safeToSendToHostedModel": not flagged_count,
+        "rowsScanned": len(sampled),
+        "flaggedRows": flagged_rows[:100],
+        "flaggedRowCount": flagged_count,
+        "matches": matches,
+        "message": "Sensitive values detected; review or redact before hosted model comparisons." if flagged_count else "No common email, phone, secret, or credential URL patterns detected in the sample.",
+    }
 
 
 def percentile(values: list[int], fraction: float) -> int:
@@ -90,6 +133,8 @@ def choose_positive_label(labels: list[str]) -> str | None:
 
 def classification_report(rows: list[dict[str, Any]], label_field: str, predictions: list[str]) -> dict[str, Any]:
     """Create reproducible class metrics and an error queue without an LLM judge."""
+    if len(rows) != len(predictions):
+        raise ValueError("Each labelled row needs one prediction.")
     labels = sorted({str(row.get(label_field, "")).strip() for row in rows if str(row.get(label_field, "")).strip()})
     positive = choose_positive_label(labels)
     tp = fp = fn = tn = 0
@@ -117,7 +162,7 @@ def classification_report(rows: list[dict[str, Any]], label_field: str, predicti
             })
     precision = tp / (tp + fp) if tp + fp else None
     recall = tp / (tp + fn) if tp + fn else None
-    f1 = 2 * precision * recall / (precision + recall) if precision is not None and recall is not None and precision + recall else None
+    f1 = 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else None
     return {
         "supported": True, "labelField": label_field, "labels": labels, "positiveLabel": positive,
         "total": len(rows), "correct": correct, "accuracy": round(correct / len(rows), 4) if rows else None,
@@ -129,16 +174,52 @@ def classification_report(rows: list[dict[str, Any]], label_field: str, predicti
     }
 
 
+def classification_prediction(output: str, labels: list[str]) -> str:
+    normalized = re.sub(r"^label\s*:\s*", "", output.strip(), flags=re.I).strip(" .\"'")
+    return next((label for label in labels if label.casefold() == normalized.casefold()), "")
+
+
+def task_quality(rows, references, outputs, row_ids):
+    """Measure labelled or structured targets; abstain on free-form correctness."""
+    rows = list(rows)
+    if not (len(rows) == len(references) == len(outputs) == len(row_ids)):
+        raise ValueError("Quality evaluation inputs must have matching lengths.")
+    field = classification_label_field(list(rows[0])) if rows else None
+    evidence = {"metric": None, "score": None, "coverage": 0, "evaluatedExamples": 0, "totalExamples": len(rows)}
+    if field and all("text" in row and field in row for row in rows):
+        labels = sorted({str(row[field]).strip() for row in rows})
+        report = classification_report([{**row, "_row_id": i} for row, i in zip(rows, row_ids)], field, [classification_prediction(output, labels) for output in outputs])
+        evidence.update(metric="label_accuracy", score=report["accuracy"], coverage=1, evaluatedExamples=len(rows))
+        return {"qualityEvidence": evidence, "classification": report}
+    scores = []
+    for reference, output in zip(references, outputs):
+        try:
+            expected = json.loads(reference)
+            if not isinstance(expected, (dict, list)):
+                continue
+        except (TypeError, ValueError):
+            continue
+        try:
+            actual = json.loads(output)
+            scores.append(int(json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)))
+        except (TypeError, ValueError):
+            scores.append(0)
+    if scores:
+        evidence.update(metric="json_exact_match", score=sum(scores)/len(scores), coverage=len(scores)/len(rows), evaluatedExamples=len(scores))
+    return {"qualityEvidence": evidence}
+
+
 def local_profile(dataset: Dataset) -> dict[str, Any]:
     columns = list(dataset.column_names)
     schema = detect_schema(columns)
     sample_size = min(len(dataset), 600)
-    sample = dataset.select(range(sample_size))
+    indices = sorted(random.Random(42).sample(range(len(dataset)), sample_size))
+    sample = dataset.select(indices)
     valid, invalid, texts, language = [], [], [], Counter()
     duplicates, code_count, redactions = 0, 0, 0
     seen: set[str] = set()
     samples: list[dict[str, Any]] = []
-    for index, row in enumerate(sample):
+    for index, row in zip(indices, sample):
         text = content_for_row(row).strip()
         if not text or not schema:
             invalid.append(index)
@@ -178,7 +259,7 @@ def local_profile(dataset: Dataset) -> dict[str, Any]:
         findings.append({"severity": "warning", "code": "uncertain_task", "message": "Task classification is uncertain; cloud clarification is available if enabled."})
     return {
         "facts": {
-            "schema": schema or "unknown", "columns": columns, "labelField": classification_label_field(columns), "rows": len(dataset), "sampledRows": sample_size,
+            "schema": schema or "unknown", "columns": columns, "labelField": classification_label_field(columns), "rows": len(dataset), "sampledRows": sample_size, "sampling": "seeded random sample across all rows (seed 42)",
             "validRows": len(valid), "rejectedRows": len(invalid), "rejectedRowIds": invalid[:50],
             "languages": dict(language), "codeRatio": round(code_ratio, 3), "duplicateRate": round(duplicate_rate, 3),
             "lengthCharacters": {"p50": percentile(lengths, .5), "p95": percentile(lengths, .95), "max": max(lengths, default=0)},
@@ -263,12 +344,54 @@ def connection_test() -> dict[str, Any]:
     return {"ok": result is not None, "message": "Connection succeeded." if result else "Connection failed or returned an unsupported response."}
 
 
+def evaluation_messages(row, instruction=""):
+    """Keep the final answer out of generation input for both model variants."""
+    label_field = classification_label_field(list(row))
+    reference = str(row[label_field]) if "text" in row and label_field else str(row.get("completion", ""))
+    if isinstance(row.get("messages"), list):
+        messages = [dict(message) for message in row["messages"]]
+        if messages and messages[-1].get("role") == "assistant":
+            reference = messages.pop().get("content", "")
+        if not messages:
+            raise ValueError("An evaluation example needs an input before its answer.")
+        if instruction:
+            messages[-1]["content"] = instruction + "\n\n" + str(messages[-1].get("content", ""))
+        return messages, reference
+    prompt = ("Text: " + str(row["text"]) + "\nLabel:") if "text" in row and label_field else str(row.get("prompt", row.get("text", "")))
+    if instruction:
+        prompt = instruction + "\n\n" + prompt
+    return [{"role": "user", "content": prompt}], reference
+
+
+def evaluation_prompt(row, tokenizer, instruction=""):
+    messages, reference = evaluation_messages(row, instruction)
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True), reference
+
+
+def retrieval_evaluation_prompt(row, tokenizer, instruction, documents, max_length=4096):
+    from quality_probe import retrieval_instruction, retrieve, query_for
+    selected = retrieve(query_for(row), documents) if documents else []
+    while selected:
+        enriched, sources = retrieval_instruction(row, instruction, selected)
+        prompt, reference = evaluation_prompt(row, tokenizer, enriched)
+        if len(tokenizer.encode(prompt, add_special_tokens=False)) <= max_length:
+            return prompt, reference, sources
+        # ponytail: keep document prefixes; use passage retrieval for larger corpora.
+        selected = [{**doc, "text":doc["text"][:len(doc["text"]) // 2]} for doc in selected if len(doc["text"]) > 32]
+    prompt, reference = evaluation_prompt(row, tokenizer, instruction)
+    return prompt, reference, []
+
+
 def baseline_compare(
     dataset: Dataset,
     candidates: list[dict[str, Any]],
     limit: int = 20,
     eval_indices: list[int] | None = None,
     task: str | None = None,
+    instruction: str = "",
+    knowledge_documents: list[dict[str, Any]] | None = None,
+    max_new_tokens: int = 512,
+    strict_context: bool = False,
 ) -> list[dict[str, Any]]:
     """Run small local base-model comparisons. This intentionally loads one model at a time."""
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -279,25 +402,31 @@ def baseline_compare(
     results = []
     for candidate in candidates:
         started = time.perf_counter()
+        model = inputs = loss_output = output = None
         try:
-            tokenizer = AutoTokenizer.from_pretrained(candidate["model"]["id"], use_fast=True)
+            local_path = candidate['model'].get('localPath')
+            tokenizer = AutoTokenizer.from_pretrained(local_path or candidate["model"]["id"], use_fast=True, **({'local_files_only': True, 'trust_remote_code': False} if local_path else {}))
             tokenizer.pad_token = tokenizer.eos_token
             quant = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4") if candidate["method"] == "qlora" else None
-            model = AutoModelForCausalLM.from_pretrained(candidate["model"]["id"], quantization_config=quant, device_map="auto")
+            model = AutoModelForCausalLM.from_pretrained(local_path or candidate["model"]["id"], quantization_config=quant, device_map="auto", **({'local_files_only': True, 'trust_remote_code': False} if local_path else {}))
             samples, scores, format_scores, losses = [], [], [], []
+            answer_seconds = []
+            references, predictions = [], []
             for index, row in enumerate(rows):
-                if isinstance(row.get("messages"), list):
-                    prompt = tokenizer.apply_chat_template(row["messages"], tokenize=False, add_generation_prompt=True)[:4000]
-                else:
-                    prompt = str(row.get("prompt", row.get("text", "")))[:4000]
-                reference = str(row.get("completion", ""))
-                inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+                prompt, reference, retrieved = retrieval_evaluation_prompt(row, tokenizer, instruction, knowledge_documents)
+                if strict_context and len(tokenizer.encode(prompt)) > 4096:
+                    raise ValueError("Benchmark input exceeds the 4096-token evaluation window; no truncated comparison is allowed.")
+                inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
                 with torch.no_grad():
                     loss_output = model(**inputs, labels=inputs["input_ids"])
                     if loss_output.loss is not None and math.isfinite(float(loss_output.loss.item())):
                         losses.append(float(loss_output.loss.item()))
-                output = model.generate(**inputs, max_new_tokens=96, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+                answer_started = time.perf_counter()
+                output = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+                answer_seconds.append(time.perf_counter() - answer_started)
                 generated = tokenizer.decode(output[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+                references.append(reference)
+                predictions.append(generated)
                 if reference:
                     expected = set(re.findall(r"\w+", reference.lower()))
                     actual = set(re.findall(r"\w+", generated.lower()))
@@ -308,15 +437,17 @@ def baseline_compare(
                         format_scores.append(1.0)
                     except (TypeError, json.JSONDecodeError):
                         format_scores.append(0.0)
-                if index < 3:
-                    samples.append({"rowId": selected_indices[index], "baseOutput": generated[:600], "referenceAvailable": bool(reference)})
+                samples.append({"retrieved": retrieved, "rowId": selected_indices[index], "input": prompt, "reference": reference, "baseOutput": generated, "referenceAvailable": bool(reference), "inputTruncated": len(tokenizer.encode(prompt)) > 4096, "hitTokenLimit": len(output[0]) - inputs["input_ids"].shape[1] >= max_new_tokens})
             eval_loss = round(sum(losses) / len(losses), 4) if losses else None
-            results.append({"modelId": candidate["model"]["id"], "status": "complete", "examples": len(rows), "evaluationIds": selected_indices, "eval_loss": eval_loss, "perplexity": round(math.exp(eval_loss), 3) if eval_loss is not None and eval_loss < 700 else None, "meanTokenOverlap": round(sum(scores) / len(scores), 3) if scores else None, "formatValidRate": round(sum(format_scores) / len(format_scores), 3) if format_scores else None, "latencySeconds": round(time.perf_counter() - started, 1), "samples": samples})
-            del model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            results.append({**task_quality(list(rows), references, predictions, selected_indices), "modelId": candidate["model"]["id"], "status": "complete", "examples": len(rows), "evaluationIds": selected_indices, "eval_loss": eval_loss, "perplexity": round(math.exp(eval_loss), 3) if eval_loss is not None and eval_loss < 700 else None, "meanTokenOverlap": round(sum(scores) / len(scores), 3) if scores else None, "formatValidRate": round(sum(format_scores) / len(format_scores), 3) if format_scores else None, "inferenceSeconds": sum(answer_seconds), "meanLatencySeconds": sum(answer_seconds) / len(answer_seconds) if answer_seconds else None, "maxOutputTokens": max_new_tokens, "latencySeconds": round(time.perf_counter() - started, 1), "samples": samples})
         except Exception as error:
             results.append({"modelId": candidate["model"]["id"], "status": "unavailable", "message": str(error)[:300]})
+        finally:
+            # Release tensors and model hook cycles before freeing the CUDA allocator cache.
+            model = inputs = loss_output = output = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     return results
 
 
@@ -327,6 +458,8 @@ def evaluate_tuned_run(
     eval_indices: list[int],
     test_dataset: Dataset | None = None,
     task: str | None = None,
+    instruction: str = "",
+    knowledge_documents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Evaluate a saved adapter on the same deterministic examples as its baseline."""
     from peft import PeftModel
@@ -335,57 +468,62 @@ def evaluate_tuned_run(
 
     model_id = candidate["model"]["id"]
     method = candidate.get("method", "qlora")
-    tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    local_path = candidate['model'].get('localPath')
+    tokenizer = AutoTokenizer.from_pretrained(local_path or model_id, use_fast=True, **({'local_files_only': True, 'trust_remote_code': False} if local_path else {}))
     tokenizer.pad_token = tokenizer.eos_token
     quantization = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4") if method == "qlora" else None
-    base = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=quantization, device_map="auto")
-    model = PeftModel.from_pretrained(base, str(run_dir / "adapter"))
-    rows_dataset = test_dataset if test_dataset is not None else dataset
-    rows = rows_dataset.select(list(eval_indices))
-    scores: list[float] = []
-    format_scores: list[float] = []
-    losses: list[float] = []
-    samples: list[dict[str, Any]] = []
-    started = time.perf_counter()
-    for position, row in enumerate(rows):
-        if isinstance(row.get("messages"), list):
-            prompt = tokenizer.apply_chat_template(row["messages"], tokenize=False, add_generation_prompt=True)[:4000]
-        else:
-            prompt = str(row.get("prompt", row.get("text", "")))[:4000]
-        reference = str(row.get("completion", ""))
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            loss_output = model(**inputs, labels=inputs["input_ids"])
-            if loss_output.loss is not None and math.isfinite(float(loss_output.loss.item())):
-                losses.append(float(loss_output.loss.item()))
-        output = model.generate(**inputs, max_new_tokens=96, do_sample=False, pad_token_id=tokenizer.eos_token_id)
-        generated = tokenizer.decode(output[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        if reference:
-            expected = set(re.findall(r"\w+", reference.lower()))
-            actual = set(re.findall(r"\w+", generated.lower()))
-            scores.append(len(expected & actual) / max(1, len(expected | actual)))
-        if task == "structured":
-            try:
-                json.loads(generated)
-                format_scores.append(1.0)
-            except (TypeError, json.JSONDecodeError):
-                format_scores.append(0.0)
-        if position < 3:
-            samples.append({"rowId": eval_indices[position], "tunedOutput": generated[:600], "referenceAvailable": bool(reference)})
-    eval_loss = round(sum(losses) / len(losses), 4) if losses else None
-    result = {
-        "status": "complete",
-        "modelId": model_id,
-        "examples": len(rows),
-        "evaluationIds": list(eval_indices),
-        "eval_loss": eval_loss,
-        "perplexity": round(math.exp(eval_loss), 3) if eval_loss is not None and eval_loss < 700 else None,
-        "meanTokenOverlap": round(sum(scores) / len(scores), 3) if scores else None,
-        "formatValidRate": round(sum(format_scores) / len(format_scores), 3) if format_scores else None,
-        "latencySeconds": round(time.perf_counter() - started, 1),
-        "samples": samples,
-    }
-    del model, base
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    return result
+    base = model = inputs = loss_output = output = None
+    try:
+        base = AutoModelForCausalLM.from_pretrained(local_path or model_id, quantization_config=quantization, device_map="auto", **({'local_files_only': True, 'trust_remote_code': False} if local_path else {}))
+        model = PeftModel.from_pretrained(base, str(run_dir / "adapter"))
+        rows_dataset = test_dataset if test_dataset is not None else dataset
+        rows = rows_dataset.select(list(eval_indices))
+        scores: list[float] = []
+        format_scores: list[float] = []
+        losses: list[float] = []
+        samples: list[dict[str, Any]] = []
+        references, predictions = [], []
+        started = time.perf_counter()
+        for position, row in enumerate(rows):
+            prompt, reference, retrieved = retrieval_evaluation_prompt(row, tokenizer, instruction, knowledge_documents)
+            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096).to(model.device)
+            with torch.no_grad():
+                loss_output = model(**inputs, labels=inputs["input_ids"])
+                if loss_output.loss is not None and math.isfinite(float(loss_output.loss.item())):
+                    losses.append(float(loss_output.loss.item()))
+            output = model.generate(**inputs, max_new_tokens=512, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+            generated = tokenizer.decode(output[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            references.append(reference)
+            predictions.append(generated)
+            if reference:
+                expected = set(re.findall(r"\w+", reference.lower()))
+                actual = set(re.findall(r"\w+", generated.lower()))
+                scores.append(len(expected & actual) / max(1, len(expected | actual)))
+            if task == "structured":
+                try:
+                    json.loads(generated)
+                    format_scores.append(1.0)
+                except (TypeError, json.JSONDecodeError):
+                    format_scores.append(0.0)
+            if position < 100:
+                samples.append({"input": prompt, "retrieved": retrieved, "rowId": eval_indices[position], "tunedOutput": generated, "referenceAvailable": bool(reference), "inputTruncated": len(tokenizer.encode(prompt)) > 4096, "hitTokenLimit": len(output[0]) - inputs["input_ids"].shape[1] >= 512})
+        eval_loss = round(sum(losses) / len(losses), 4) if losses else None
+        result = {
+            **task_quality(list(rows), references, predictions, list(eval_indices)),
+            "status": "complete",
+            "modelId": model_id,
+            "examples": len(rows),
+            "evaluationIds": list(eval_indices),
+            "eval_loss": eval_loss,
+            "perplexity": round(math.exp(eval_loss), 3) if eval_loss is not None and eval_loss < 700 else None,
+            "meanTokenOverlap": round(sum(scores) / len(scores), 3) if scores else None,
+            "formatValidRate": round(sum(format_scores) / len(format_scores), 3) if format_scores else None,
+            "latencySeconds": round(time.perf_counter() - started, 1),
+            "samples": samples,
+        }
+        return result
+    finally:
+        base = model = inputs = loss_output = output = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
