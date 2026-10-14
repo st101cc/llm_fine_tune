@@ -1,6 +1,6 @@
 const fs = require("node:fs");
-const app = fs.readFileSync("app.js", "utf8");
-const index = fs.readFileSync("index.html", "utf8");
+const app = fs.readFileSync(__dirname + "/../public/app.js", "utf8");
+const index = fs.readFileSync(__dirname + "/../index.html", "utf8");
 for (const label of ["LoRA", "QLoRA", "Full fine-tuning", "Prompt + RAG"]) {
   if (!app.includes(label)) throw new Error("Missing method: " + label);
 }

@@ -131,7 +131,7 @@ loaded until you explicitly continue to model evaluation. Run the API with
 `FORGETUNE_DATA_ROOT` optionally selects a separate storage directory. This local
 session uses the repository's ignored `.forge-data/` directory.
 
-Checks: `python -m pytest trainer -q` and `node test-datasets.cjs` (Playwright and
+Checks: `python -m pytest trainer -q` and `node test/test-datasets.cjs` (Playwright and
 the web server required). The API tests exercise real file uploads and SQLite
 restart/resume; browser tests use controlled API responses.
 
@@ -209,8 +209,8 @@ References consulted:
 - [Nemotron dataset card](https://huggingface.co/datasets/nvidia/Nemotron-Cascade-2-SFT-Data)
 - [Hugging Face streaming](https://huggingface.co/docs/datasets/stream)
 
-Verification: `python -m pytest trainer -q`, `node test-datasets.cjs`, and
-`node test-workflow-prompts.cjs`. Browser tests require the web server and Playwright
+Verification: `python -m pytest trainer -q`, `node test/test-datasets.cjs`, and
+`node test/test-workflow-prompts.cjs`. Browser tests require the web server and Playwright
 (or `PLAYWRIGHT_MODULE` pointing to the installed module). GPU inference must be
 verified separately in the WSL training environment.
 
@@ -248,7 +248,7 @@ Training now uses the development split for epoch validation. The final split is
 
 The general-assistant Nemotron pilot uses 200 shuffled conversations that fit 2,048 tokens, excludes the earlier test questions, and splits into 170 training / 10 development / 20 final examples. Three development examples are used for the bounded prompt/RAG checks. It is a pilot on shorter conversations, not a full-dataset or long-context benchmark.
 
-Checks: `python -m pytest trainer -q`; `node --test test-compass.mjs`; browser scripts `test-integrated-tools.cjs`, `test-workflow-prompts.cjs`, and `test-datasets.cjs` (set `PLAYWRIGHT_MODULE` if using a bundled Playwright installation).
+Checks: `python -m pytest trainer -q`; `node --test test-compass.mjs`; browser scripts `test/test-integrated-tools.cjs`, `test/test-workflow-prompts.cjs`, and `test/test-datasets.cjs` (set `PLAYWRIGHT_MODULE` if using a bundled Playwright installation).
 
 
 ### Development benchmark model selection
@@ -273,4 +273,4 @@ At the model review checkpoint, the existing Compass form locks the split, numbe
 
 Existing saved workflows retain their original decisions. **Benchmark models on this dataset** creates a new workflow using the same dataset and split seed. Previously inspected final results remain historical; use a fresh untouched final set before claiming a new model improvement.
 
-Checks: `.venv/Scripts/python.exe -m pytest trainer -q`, `node --test test-compass.mjs`, and `node test-model-selection.cjs` (set `PLAYWRIGHT_MODULE` if Playwright is supplied by the desktop runtime).
+Checks: `.venv/Scripts/python.exe -m pytest trainer -q`, `node --test test-compass.mjs`, and `node test/test-model-selection.cjs` (set `PLAYWRIGHT_MODULE` if Playwright is supplied by the desktop runtime).

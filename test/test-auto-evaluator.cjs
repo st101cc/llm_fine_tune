@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const source = fs.readFileSync(__dirname + "/app.js", "utf8");
+const source = fs.readFileSync(__dirname + "/../public/app.js", "utf8");
 const context = vm.createContext({
   escapeHtml: value => String(value ?? "").replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
   percentage: value => `${Math.round(value * 100)}%`,

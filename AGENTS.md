@@ -4,8 +4,9 @@
 
 The working application lives at the repository root:
 
-- `app.js`, `index.html`, and `*.css` contain the browser UI.
-- `server.mjs` and supporting `*.mjs`/`*.js` files provide the Node.js web server and workflow helpers.
+- `index.html` is the app shell; `public/` holds the browser UI's `*.js` and `*.css` files.
+- `server.mjs` and its `*.mjs` helpers (`compass.mjs`, `quality-proxy.mjs`) provide the Node.js web server.
+- `test/` holds the Node test scripts (`test-*.cjs`); `test-compass.mjs` and `test-quality-stream.mjs` stay at the repository root alongside the server modules they exercise.
 - `trainer/` contains the FastAPI/LangGraph Python service, training code, imports, evaluation, and Python tests.
 - `validation/` and the Markdown reports hold small validation fixtures and experiment notes.
 - `trainer/data/` and `.forge-data/` are runtime artifacts; do not commit generated databases, logs, models, or adapters.
@@ -18,7 +19,7 @@ From the repository root:
 npm start
 python -m pytest trainer -q
 node --test test-compass.mjs
-node test-datasets.cjs
+node test/test-datasets.cjs
 ```
 
 The first command serves the UI at `http://127.0.0.1:4173`. Python tests cover the trainer and workflow logic. Browser-oriented scripts require the web server and Playwright; set `PLAYWRIGHT_MODULE` when the runtime does not provide it. For local GPU/VM startup, use `powershell -ExecutionPolicy Bypass -File start-auto.ps1`; `-CheckOnly` inspects the target and `-SelfTest` checks GPU selection.
@@ -29,7 +30,7 @@ Use 2-space indentation in JavaScript and 4 spaces in Python. Keep the existing 
 
 ## Testing Guidelines
 
-Add Python tests beside the code in `trainer/test_*.py`. Use pytest and temporary directories/mocks for filesystem, model, and workflow boundaries. Add Node tests as `test-*.cjs` or `test-*.mjs`. Run the narrowest relevant test first, then the full trainer suite before submitting.
+Add Python tests beside the code in `trainer/test_*.py`. Use pytest and temporary directories/mocks for filesystem, model, and workflow boundaries. Add Node tests as `test/test-*.cjs`. Run the narrowest relevant test first, then the full trainer suite before submitting.
 
 ## Commits and Pull Requests
 
