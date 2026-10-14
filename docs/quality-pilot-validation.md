@@ -6,7 +6,26 @@ Date: 2026-10-05. Branch: `codex/traditional-chinese-quality`.
 
 The software workflow is implemented and verified locally: import an existing/uploaded dataset, audit it, explicitly review corrections, create a derivative, export, independently evaluate, or open the existing training-approval flow. Existing user changes were preserved; nothing was committed or deployed to the existing VM backend. The existing port-4173 application remains unchanged as a running service. A separate validation preview is available at `http://127.0.0.1:4174/#/quality`, backed by port 18001 and isolated synthetic runtime data.
 
-Live TAIDE model validation is **blocked**, not passed. No production-readiness, Taiwan-residency, commercial-quality, or model-improvement claim is made.
+Live TAIDE model validation was **blocked** at the time of this report, not passed. No production-readiness, Taiwan-residency, commercial-quality, or model-improvement claim is made. See the 2026-10-14 update below.
+
+## Update 2026-10-14: live T4 runs and TaiwanChat comparison
+
+The owner approved the bnb4 (NF4, double-quant) path. On the `gcp-dev` VM (2× Tesla T4, 15 GB), TAIDE `6738923…` is cached and runs end to end.
+
+- **TMMLU+ baseline (v4 manifest):** 8/30 (26.7%). The MCQ token budget was raised from 8 to 200 and scoring reads the leading A–D letter, because TAIDE echoes the chosen option text and sometimes explains despite the instruction. Raw outputs are stored unmodified.
+- **GPU ledger:** raised from 1,800 to 6,000 aggregate seconds by owner approval; each run is still capped at 1,800 s. 5,698 s used after this update.
+- **TaiwanChat original-vs-reviewed QLoRA** (`trainer/taiwanchat_experiment.py`, dataset `yentinglin/TaiwanChat@d766aa2`, CC-BY-NC-4.0, internal research only): 500 single-turn rows with ≤480 tokens, 250 of them containing terms from the owner-approved list `validation/taiwanchat-terms.json` (38 mappings, approved by cherrie.chen). The reviewed variant applies only those mappings to final answers (787 replacements). Settings: rank 16, alpha 32, lr 2e-4, 2 epochs, 126 steps, ~1,320 GPU-s per run. Train loss was 1.51 for both variants.
+- **Evaluation:** 60 held-out TaiwanChat prompts whose reference answers used listed terms, scored with 128-token writing samples (`writing_sample_tokens`, kept and marked truncated), plus the TMMLU+ smoke subset.
+
+| Model | Listed mainland terms / 1k chars | Answers with any listed term | TMMLU+ |
+|---|---|---|---|
+| Base TAIDE | 4.0 | 32/60 | 8/30 |
+| Trained on original data | 7.6 | 37/60 | 8/29 (1 overrun) |
+| Trained on reviewed data | 1.6 | 13/60 | 8/30 |
+
+Unreviewed data increased mainland usage; reviewed data reduced it below base, with no TMMLU+ change. Limitations: 60 prompts, one seed and greedy decoding, with no significance test. Prompts drawn from TaiwanChat contain listed terms, so all models partly echo them. Classification and writing answers still need human review.
+
+A bug in the 算法→演算法 replacement also rewrote existing 演算法, which corrupted 15 of the 500 reviewed training rows into 演演算法. The reviewed model emitted 演演算法 once. Self-containing replacements are now excluded automatically, and the scores above use the corrected scoring. The reviewed adapter was not retrained because only 302 GPU-seconds remain.
 
 ## Verified software checks
 

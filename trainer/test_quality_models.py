@@ -61,6 +61,7 @@ def test_missing_cache_is_actionable_and_never_downloads(models, monkeypatch):
         assert kwargs["local_files_only"] is True
         raise FileNotFoundError("empty cache")
     monkeypatch.setattr(huggingface_hub, "snapshot_download", missing)
+    monkeypatch.setattr(huggingface_hub, "scan_cache_dir", lambda: SimpleNamespace(repos=[]))
     status = models.get_model_status()
     assert status["status"] == "missing_weights"
     assert "prepare" in status["message"]
@@ -89,7 +90,7 @@ def test_generation_greedy_no_truncation_and_provenance(models, snapshot, monkey
         model_max_length = 512
         eos_token_id = 2
         def apply_chat_template(self, messages, **kwargs):
-            assert "A" in messages[0]["content"]
+            assert "A" in messages[0]["content"] or messages[0]["content"] == models.TEXT_INSTRUCTION
             return messages[-1]["content"]
         def __call__(self, prompt, **kwargs):
             assert kwargs.get("truncation") is False
@@ -103,7 +104,9 @@ def test_generation_greedy_no_truncation_and_provenance(models, snapshot, monkey
         def eval(self):
             return self
         def generate(self, input_ids, **kwargs):
-            assert kwargs["do_sample"] is False and kwargs["max_new_tokens"] == 200
+            assert kwargs["do_sample"] is False and kwargs["max_new_tokens"] in (200, 4)
+            if kwargs["max_new_tokens"] == 4:
+                return torch.tensor([input_ids[0].tolist() + [65] * 4])  # Runs to the limit without EOS.
             return torch.tensor([input_ids[0].tolist() + [65, 2]])
     def load_tokenizer(path, **kwargs):
         assert Path(path) == snapshot and kwargs["local_files_only"] is True
@@ -121,6 +124,12 @@ def test_generation_greedy_no_truncation_and_provenance(models, snapshot, monkey
     with pytest.raises(ValueError, match="truncat|context"):
         models.generate_answers([{**cases[0], "input": "long"}])
     assert models.generate_answers(cases, cancelled=lambda: True) == []
+    assert "truncated" not in rows[0] and "writingSampleTokens" not in rows[0]["protocol"]
+    sampled = models.generate_answers([{"id": "w", "input": "Q", "task": "writing"}, *cases], writing_sample_tokens=4)
+    assert sampled[0]["truncated"] is True and sampled[0]["protocol"]["writingSampleTokens"] == 4
+    assert "truncated" not in sampled[1] and sampled[1]["protocol"]["maxNewTokens"] == 200
+    with pytest.raises(ValueError, match="writing_sample_tokens"):
+        models.generate_answers(cases, writing_sample_tokens=0)
 
 
 def test_eight_step_training_uses_safe_local_boundary(pilot, snapshot, tmp_path, monkeypatch):
@@ -359,7 +368,7 @@ def test_persistent_budget_charges_failed_processes_and_cannot_reset(pilot, free
     assert first["budget"]["chargedGpuSeconds"] == 10
     second = pilot.generate_bounded(cases, runtime_root=tmp_path, max_seconds=100)
     assert second["budget"]["chargedGpuSeconds"] == 20
-    assert pilot.budget_status(tmp_path)["remainingGpuSeconds"] == 1780
+    assert pilot.budget_status(tmp_path)["remainingGpuSeconds"] == pilot.BUDGET_LIMIT_SECONDS - 20
 
 
 @pytest.mark.parametrize("inventory,pids,reason", [("GPU-busy, 40000\n", "999\n", "gpu_busy"), ("GPU-small, 1000\n", "", "insufficient_vram")])
@@ -373,7 +382,10 @@ def test_bounded_generation_refuses_busy_or_small_gpu(pilot, models, snapshot, t
 def test_persistent_reservation_survives_process_restart(pilot, tmp_path):
     reservation = pilot._reserve_budget(tmp_path, 1800)
     assert reservation["reservedGpuSeconds"] == 1800
+    while pilot._reserve_budget(tmp_path, 1800)["reservedGpuSeconds"]:
+        pass
     assert pilot.budget_status(tmp_path)["remainingGpuSeconds"] == 0
+    assert pilot.budget_status(tmp_path)["chargedGpuSeconds"] == pilot.BUDGET_LIMIT_SECONDS
     assert pilot._reserve_budget(tmp_path, 1)["reservedGpuSeconds"] == 0
 
 

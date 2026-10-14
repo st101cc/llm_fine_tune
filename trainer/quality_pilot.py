@@ -1,4 +1,4 @@
-"""Explicit offline synthetic pilot with a shared 1800 single-GPU-second budget.
+"""Explicit offline synthetic pilot with a shared single-GPU-second budget ledger.
 
 Parent owns timing and terminates only its worker process tree. Workers are
 sequential, CPU data loading uses no subprocesses, and CUDA sees one GPU.
@@ -45,11 +45,16 @@ def _budget_db(runtime_root):
         yield db
 
 
+# Aggregate ledger, raised from 1800 by owner approval (2026-10-14) for the TaiwanChat original-vs-reviewed QLoRA comparison.
+# Each individual run is still capped at 1800 seconds.
+BUDGET_LIMIT_SECONDS = 6000
+
+
 def budget_status(runtime_root):
     """Persistent aggregate budget; unfinished reservations remain fully charged."""
     with _budget_db(runtime_root) as db:
         charged = db.execute("SELECT COALESCE(SUM(charge),0) FROM reservations").fetchone()[0]
-    return {"limitGpuSeconds": 1800, "chargedGpuSeconds": charged, "remainingGpuSeconds": max(0, 1800 - charged)}
+    return {"limitGpuSeconds": BUDGET_LIMIT_SECONDS, "chargedGpuSeconds": charged, "remainingGpuSeconds": max(0, BUDGET_LIMIT_SECONDS - charged)}
 
 
 def _reserve_budget(runtime_root, seconds):
@@ -58,7 +63,7 @@ def _reserve_budget(runtime_root, seconds):
     with _budget_db(runtime_root) as db:
         db.execute("BEGIN IMMEDIATE")
         charged = db.execute("SELECT COALESCE(SUM(charge),0) FROM reservations").fetchone()[0]
-        allowance = min(seconds, max(0, 1800 - charged))
+        allowance = min(seconds, max(0, BUDGET_LIMIT_SECONDS - charged))
         token = str(uuid.uuid4()) if allowance else None
         if token:
             db.execute("INSERT INTO reservations VALUES(?,?,?)", (token, allowance, "reserved"))
@@ -118,13 +123,13 @@ def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, 
     if cancelled():
         return response("cancelled", "Cancelled before launching a worker.")
     if budget_status(root)["remainingGpuSeconds"] <= 0:
-        return response("budget_exhausted", "Persistent 1800 GPU-second budget exhausted.")
+        return response("budget_exhausted", "Persistent GPU-second budget exhausted.")
     device, reason, message = _select_idle_gpu(gpu, **({"load_mode": load_mode} if load_mode != "fp16" else {}))
     if device is None:
         return response("unavailable", message, reason=reason)
     reservation = _reserve_budget(root, max_seconds)
     if not reservation["reservedGpuSeconds"]:
-        return response("budget_exhausted", "Persistent 1800 GPU-second budget exhausted.")
+        return response("budget_exhausted", "Persistent GPU-second budget exhausted.")
     charged = reservation["reservedGpuSeconds"]
     try:
         try:
@@ -141,7 +146,7 @@ def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, 
         _settle_budget(root, reservation, charged)
 
 
-def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, max_seconds=1800, revision=None, load_mode="fp16"):
+def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, max_seconds=1800, revision=None, load_mode="fp16", writing_sample_tokens=None):
     """Route-safe offline inference: reserved persistent budget + owned subprocess.
 
     Status reads do not infer license acceptance. No download or training occurs.
@@ -155,6 +160,8 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
         raise ValueError("Generation requires 1-1000 valid cases, each input at most 65536 characters")
     if len({c["id"] for c in cases}) != len(cases):
         raise ValueError("Duplicate generation case IDs")
+    if writing_sample_tokens is not None and (isinstance(writing_sample_tokens, bool) or not isinstance(writing_sample_tokens, int) or not 1 <= writing_sample_tokens <= 256):
+        raise ValueError("writing_sample_tokens must be an integer from 1 to 256")
     if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or not 0 < max_seconds <= 1800:
         raise ValueError("max_seconds must be > 0 and <= 1800")
     def response(status, message, **extra):
@@ -162,7 +169,7 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
     if cancelled():
         return response("cancelled", "Generation cancelled before launch.")
     if budget_status(runtime_root)["remainingGpuSeconds"] <= 0:
-        return response("budget_exhausted", "The persistent 1800 GPU-second budget has been exhausted.")
+        return response("budget_exhausted", "The persistent GPU-second budget has been exhausted.")
     status = get_model_status(model_id, **({'revision': revision} if revision else {}))
     if status["status"] != "ready":
         return response("unavailable", status["message"], reason=status["status"], model=status)
@@ -170,7 +177,7 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
     if not directory.resolve().is_relative_to(_runtime_directory(runtime_root)):
         raise ValueError("Generation directory escapes runtime area")
     directory.mkdir(parents=True)
-    request = {"loadMode": load_mode, "cases": cases, "modelId": model_id, "revision": status["revision"], "adapterPath": str(Path(adapter_path).resolve()) if adapter_path else None}
+    request = {"loadMode": load_mode, "cases": cases, "modelId": model_id, "revision": status["revision"], "adapterPath": str(Path(adapter_path).resolve()) if adapter_path else None, "writingSampleTokens": writing_sample_tokens}
     (directory / "request.json").write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
     command = [sys.executable, "-B", str(Path(__file__).resolve()), "--output", str(directory), "--model", model_id, "--revision", status["revision"], "--worker", "generate"]
     run = run_with_pilot_budget(runtime_root, [command], max_seconds=max_seconds, cancelled=cancelled, log_dir=directory, **({"load_mode": load_mode} if load_mode != "fp16" else {}))
@@ -456,7 +463,7 @@ def _worker(output, model_id, phase, revision):
                 temporary = output / "answers.tmp"
                 temporary.write_text(json.dumps({"status": "running", "answers": answers}, ensure_ascii=False), encoding="utf-8")
                 temporary.replace(output / "answers.json")
-            answers = generate_answers(request["cases"], request["modelId"], adapter_path=request["adapterPath"], revision=request["revision"], load_mode=request.get("loadMode", "fp16"), on_answer=checkpoint)
+            answers = generate_answers(request["cases"], request["modelId"], adapter_path=request["adapterPath"], revision=request["revision"], load_mode=request.get("loadMode", "fp16"), on_answer=checkpoint, writing_sample_tokens=request.get("writingSampleTokens"))
             result = {"status": "complete", "answers": answers, "message": "Offline local generation completed."}
         except Exception as exc:
             result = {"status": "unavailable", "answers": getattr(exc, "answers", []), "reason": "generation_failed", "message": f"{type(exc).__name__}: {exc}"}
