@@ -2,8 +2,10 @@
   "purpose": "Approved mainland-to-Taiwan terminology for the TaiwanChat original-vs-reviewed QLoRA comparison. Applied only to final assistant answers through quality_policy customer terms; code, URLs and quotations stay protected.",
   "reviewer": "cherrie.chen",
   "approvedAt": "2026-10-14",
+  "amendments": ["2026-10-14 cherrie.chen: added 大數據→巨量資料 so 數據→資料 no longer produces 大資料."],
   "terms": {
     "信息": "資訊",
+    "大數據": "巨量資料",
     "數據": "資料",
     "數據庫": "資料庫",
     "視頻": "影片",

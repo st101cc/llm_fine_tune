@@ -45,9 +45,10 @@ def _budget_db(runtime_root):
         yield db
 
 
-# Aggregate ledger, raised from 1800 by owner approval (2026-10-14) for the TaiwanChat original-vs-reviewed QLoRA comparison.
+# Aggregate ledger, raised from 1800 by owner approval (2026-10-14): 6000 for the TaiwanChat
+# original-vs-reviewed comparison, then 15000 for UI comparisons and a confirmation rerun.
 # Each individual run is still capped at 1800 seconds.
-BUDGET_LIMIT_SECONDS = 6000
+BUDGET_LIMIT_SECONDS = 15000
 
 
 def budget_status(runtime_root):
