@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import {handleCompass} from "./compass.mjs";
 import {streamTrainer} from "./quality-proxy.mjs";
 
-try {process.loadEnvFile(fileURLToPath(new URL("../.env", import.meta.url)));} catch(error) {if(error.code!=="ENOENT") throw error;}
+try {process.loadEnvFile(fileURLToPath(new URL("./.env", import.meta.url)));} catch(error) {if(error.code!=="ENOENT") throw error;}
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const port = Number(process.env.PORT || 4173);

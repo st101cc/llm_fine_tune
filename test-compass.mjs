@@ -53,6 +53,6 @@ test("Website routes keep the key server-side and persist completed comparisons"
     await new Promise(resolve=>server.close(resolve));
     if(savedKey===undefined)delete process.env.ADVISOR_API_KEY;else process.env.ADVISOR_API_KEY=savedKey;
     if(savedBase===undefined)delete process.env.ADVISOR_BASE_URL;else process.env.ADVISOR_BASE_URL=savedBase;
-    await unlink(new URL(`../.forge-data/compass/${id}-development.json`,import.meta.url)).catch(error=>{if(error.code!=="ENOENT")throw error;});
+    await unlink(new URL(`./.forge-data/compass/${id}-development.json`,import.meta.url)).catch(error=>{if(error.code!=="ENOENT")throw error;});
   }
 });

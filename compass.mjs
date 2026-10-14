@@ -4,7 +4,7 @@ import {join} from "node:path";
 import {createHash} from "node:crypto";
 import {setTimeout as delay} from "node:timers/promises";
 
-const storage = fileURLToPath(new URL("../.forge-data/compass/", import.meta.url));
+const storage = fileURLToPath(new URL("./.forge-data/compass/", import.meta.url));
 const active = new Map();
 const endpoint = "https://compass.llm.shopee.io/compass-api/v1";
 const failure = (status, message) => Object.assign(new Error(message), {status});

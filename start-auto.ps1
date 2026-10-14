@@ -8,7 +8,7 @@ if ($SelfTest) {
     Write-Output 'GPU selection checks passed: no GPU, two T4s, nominal 24 GB GPU.'
     return
 }
-$projectPath = Split-Path $PSScriptRoot -Parent
+$projectPath = $PSScriptRoot
 $runtimePath = Join-Path $projectPath '.forge-data'
 $logPath = Join-Path $runtimePath 'logs'
 New-Item -ItemType Directory -Force -Path $logPath | Out-Null
@@ -33,7 +33,7 @@ if ($localGpu) {
 } else {
     # The VM backend is installed separately; SSH never exposes its API publicly.
     & ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 $VmHost 'curl --fail --silent http://127.0.0.1:18000/hardware'
-    if ($LASTEXITCODE -ne 0) { throw 'VM backend is offline. Start ~/forgetune-backend/trainer/start-vm-backend.sh on the VM.' }
+    if ($LASTEXITCODE -ne 0) { throw 'VM backend is offline. Run /home/jupyter/dev-01/cherrie.chen/llm_fine_tune/trainer/start-vm-backend.sh on the VM.' }
     if (-not (Get-NetTCPConnection -LocalPort 18000 -State Listen -ErrorAction SilentlyContinue)) {
         Start-Process ssh -ArgumentList @('-N','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=30','-o','ServerAliveCountMax=3','-L','127.0.0.1:18000:127.0.0.1:18000',$VmHost) -WindowStyle Hidden -RedirectStandardOutput "$logPath/tunnel.out.log" -RedirectStandardError "$logPath/tunnel.err.log" | Out-Null
     }
