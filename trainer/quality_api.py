@@ -47,6 +47,7 @@ class EvaluationRequest(StrictRequest):
     allSubjects: bool = False
     adapterRunId: str | None = None
     maxGpuSeconds: int = Field(default=300, ge=1, le=1800)
+    writingSampleTokens: int | None = Field(default=None, ge=1, le=256)
 
 
 def guarded(function):
@@ -280,6 +281,8 @@ def install_quality_routes(app, get_root):
             raise ValueError('Provide frozen cases or a prepared benchmark revision.')
         if body.generate and body.answers:
             raise ValueError('Choose uploaded answers or local generation, not both.')
+        if body.writingSampleTokens and not body.generate:
+            raise ValueError('Fixed-length writing samples require local generation.')
         evaluate(cases, [], policy)  # Validate frozen cases before any expensive model work.
         adapter = None
         if body.adapterRunId:
@@ -294,7 +297,7 @@ def install_quality_routes(app, get_root):
             adapter = (run_dir / 'adapter').resolve()
             if not adapter.is_relative_to(run_dir):
                 raise ValueError('Invalid adapter artifact.')
-        record = {'loadMode': body.loadMode, 'id': str(uuid.uuid4()), 'createdAt': datetime.now(timezone.utc).isoformat(), 'status': 'queued', 'policy': policy,
+        record = {'loadMode': body.loadMode, 'writingSampleTokens': body.writingSampleTokens, 'id': str(uuid.uuid4()), 'createdAt': datetime.now(timezone.utc).isoformat(), 'status': 'queued', 'policy': policy,
                   'frozenCasesHash': digest(cases), 'cases': cases, 'benchmark': {k: v for k, v in benchmark.items() if k != 'cases'} if benchmark else None}
         target.put('evaluation', record)
 
@@ -305,7 +308,7 @@ def install_quality_routes(app, get_root):
                 answers = body.answers
                 if body.generate:
                     from quality_pilot import generate_bounded
-                    generated = generate_bounded(cases, runtime_root=target.root, adapter_path=adapter, cancelled=event.is_set, max_seconds=body.maxGpuSeconds, **({"load_mode": body.loadMode} if body.loadMode != "fp16" else {}))
+                    generated = generate_bounded(cases, runtime_root=target.root, adapter_path=adapter, cancelled=event.is_set, max_seconds=body.maxGpuSeconds, writing_sample_tokens=body.writingSampleTokens, **({"load_mode": body.loadMode} if body.loadMode != "fp16" else {}))
                     record['generation'] = generated
                     if generated['status'] != 'complete':
                         record.update(status=generated['status'], message=generated['message'])

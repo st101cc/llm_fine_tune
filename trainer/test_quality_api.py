@@ -79,3 +79,18 @@ def test_local_generation_unavailable_is_not_success(tmp_path, monkeypatch):
         record = finished(client, '/quality/evaluations/' + response.json()['id'])
         assert record['status'] == 'unavailable'
         assert 'result' not in record
+
+
+def test_writing_sample_tokens_require_generation_and_reach_the_generator(tmp_path, monkeypatch):
+    import quality_pilot
+    seen = {}
+    monkeypatch.setattr(quality_pilot, 'generate_bounded', lambda *a, **k: seen.update(k) or {'status': 'unavailable', 'message': 'stub', 'answers': [], 'budget': {'chargedGpuSeconds': 0}})
+    client, _ = setup_client(tmp_path)
+    case = {'id': 'w', 'input': 'q', 'task': 'writing'}
+    with client:
+        assert client.post('/quality/evaluations', json={'cases': [case], 'writingSampleTokens': 64}).status_code >= 400
+        assert client.post('/quality/evaluations', json={'cases': [case], 'generate': True, 'writingSampleTokens': 999}).status_code == 422
+        response = client.post('/quality/evaluations', json={'cases': [case], 'generate': True, 'writingSampleTokens': 64})
+        assert response.status_code == 202, response.text
+        record = finished(client, '/quality/evaluations/' + response.json()['id'])
+    assert record['writingSampleTokens'] == 64 and seen['writing_sample_tokens'] == 64
