@@ -506,7 +506,8 @@ function evaluate(id) {
 }
 
 function runDetails(id) {
-  const run = state.runs.find(item => item.id === id); if (!run) return location.hash = "#/runs";
+  const run = state.runs.find(item => item.id === id);
+  if (!run) return syncServerRuns().catch(() => false).then(() => state.runs.some(item => item.id === id) ? runDetails(id) : location.hash = "#/runs");
   const isComplete = run.status === "complete";
   const loss = Number.isFinite(run.loss) ? run.loss.toFixed(2) : "—";
   const perplexity = Number.isFinite(run.perplexity) ? run.perplexity.toFixed(2) : "Pending";
@@ -518,7 +519,27 @@ function runDetails(id) {
   document.querySelector("#back-history").onclick = () => location.hash = "#/runs";
 }
 
+async function syncServerRuns() {
+  // Runs started by workflows or other browsers exist only on the trainer; merge them by ID.
+  const response = await fetch("/api/runs");
+  if (!response.ok) return false;
+  for (const remote of await response.json()) {
+    const config = remote.config || {};
+    const fields = {id:remote.id, remote:true, status:remote.status, model:config.base_model, method:config.parameter_method,
+      dataset:config.dataset?.displayName || config.dataset?.name, startedAt:remote.startedAt || remote.createdAt, framework:remote.framework,
+      loss:remote.metrics?.eval_loss, perplexity:remote.metrics?.perplexity, progress:remote.status === "complete" ? 100 : undefined, workflowId:remote.workflowId,
+      elapsed:remote.startedAt && remote.completedAt ? Math.round((Date.parse(remote.completedAt) - Date.parse(remote.startedAt)) / 1000) : undefined};
+    Object.keys(fields).forEach(key => fields[key] === undefined && delete fields[key]);
+    const local = state.runs.find(run => run.id === remote.id);
+    if (local) Object.assign(local, fields); else state.runs.push(fields);
+  }
+  state.runs.sort((a, b) => String(b.startedAt || "").localeCompare(String(a.startedAt || "")));
+  save();
+  return true;
+}
+
 function runs() {
+  if (!runs.synced) { runs.synced = true; syncServerRuns().then(ok => ok && route() === "runs" && runs()).catch(() => {}).finally(() => { runs.synced = false; }); }
   const body = state.runs.length ? state.runs.map(run => "<div class='run'><div><strong>" + escapeHtml(runTitle(run)) + "</strong><span><b>Dataset:</b> " + escapeHtml(runDatasetLabel(run)) + " · " + escapeHtml(run.startedAt || "date not recorded") + " · loss " + (Number.isFinite(run.loss) ? run.loss.toFixed(2) : "—") + "</span></div><div class='run-actions'><span class='pill " + runStatusClass(run) + "'>" + escapeHtml(run.status) + "</span><button class='button' data-open='" + run.id + "'>View details</button></div></div>").join("") : "<div class='empty'><strong>No training runs yet</strong>Start with a dataset and safe QLoRA preset.</div>";
   app.innerHTML = shell("Training runs", "Your local training history.", "Each run keeps its dataset reference, method, metrics, and artifacts on this computer.", "<button class='button primary' id='new-run'>+ New fine-tune</button>") + "<section class='card run-list'>" + body + "</section></div>";
   document.querySelector("#new-run").onclick = () => location.hash = "#/workspace";
