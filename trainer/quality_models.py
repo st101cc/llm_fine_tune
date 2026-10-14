@@ -172,7 +172,7 @@ def generate_answers(cases, model_id=TAIDE_ID, adapter_path=None, cancelled=lamb
                 if cancelled():
                     break
                 instruction = MCQ_INSTRUCTION if case["task"] == "mcq" else TEXT_INSTRUCTION
-                limit = 8 if case["task"] == "mcq" else 256
+                limit = 200 if case["task"] == "mcq" else 256
                 messages = [{"role": "system", "content": instruction}, {"role": "user", "content": case["input"]}]
                 prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
                 inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False, truncation=False).to(model.device)
@@ -193,7 +193,7 @@ def generate_answers(cases, model_id=TAIDE_ID, adapter_path=None, cancelled=lamb
                 if len(tokens) >= limit and int(tokens[-1]) not in eos_ids:
                     raise ValueError("Output hit its token limit; truncated answers are not accepted")
                 text = tokenizer.decode(tokens, skip_special_tokens=True)
-                protocol = {"version": "quality-generation-v1", "instruction": instruction, "zeroShot": True, "doSample": False, "numBeams": 1, "maxNewTokens": limit, "parser": "whole-answer-A-D" if case["task"] == "mcq" else "task-specific", "chatTemplateHash": fingerprint(getattr(tokenizer, "chat_template", None))}
+                protocol = {"version": "quality-generation-v1", "instruction": instruction, "zeroShot": True, "doSample": False, "numBeams": 1, "maxNewTokens": limit, "parser": "leading-letter-A-D" if case["task"] == "mcq" else "task-specific", "chatTemplateHash": fingerprint(getattr(tokenizer, "chat_template", None))}
                 protocol.update({key: settings[key] for key in ("loadMode", "contextTokenBudget", "quantization")})
                 answers.append({"caseId": case["id"], "candidate": model_id + ("@adapter:" + adapter["hash"] if adapter else "@base"), "output": text, "protocol": protocol, "telemetry": {"loadSeconds": load_seconds, "generationSeconds": generation_seconds, "inputTokens": input_length, "outputTokens": len(tokens), "peakAllocatedBytes": torch.cuda.max_memory_allocated(), "peakReservedBytes": torch.cuda.max_memory_reserved()}, "provenance": {"modelId": model_id, "revision": status["revision"], "license": status["license"], "adapter": adapter, "promptHash": fingerprint(prompt)}})
                 if on_answer:

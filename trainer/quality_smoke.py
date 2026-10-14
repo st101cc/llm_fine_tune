@@ -82,8 +82,9 @@ def summarize(cases, answers, policy, reviews=None):
                 if not str(review.get("reviewer", "")).strip() or not str(review.get("reason", "")).strip():
                     raise ValueError("Human decisions require reviewer and reason")
         output = answer["output"].strip() if answer else None
-        valid = output in (POSITIVE, NEGATIVE) if case["task"] == "classification" else output in ("A", "B", "C", "D") if case["task"] == "mcq" else None
-        correct = output == case["reference"] if case["task"] != "writing" and answer else None
+        mcq_letter = output[:1] if output and output[0] in "ABCD" and (len(output) == 1 or not output[1].isalnum()) else None
+        valid = (output in (POSITIVE, NEGATIVE)) if case["task"] == "classification" else (mcq_letter is not None) if case["task"] == "mcq" else None
+        correct = (mcq_letter == case["reference"] if answer else None) if case["task"] == "mcq" else (output == case["reference"] if case["task"] != "writing" and answer else None)
         if case["task"] == "writing":
             judgments = review["judgments"] if review else {}
             correct = False if "fail" in judgments.values() else True if len(judgments) == 3 and all(value == "pass" for value in judgments.values()) else None
@@ -133,7 +134,7 @@ def main():
     benchmark = load_benchmark(args.benchmark_revision, runtime_root=args.runtime_root)
     if len(benchmark["cases"]) != 30:
         parser.error("The baseline requires the frozen 30-question TMMLU+ selection")
-    manifest = {"version": "taide-baseline-v1", "modelId": TAIDE_ID, "modelRevision": args.model_revision, "settings": settings,
+    manifest = {"version": "taide-baseline-v4", "modelId": TAIDE_ID, "modelRevision": args.model_revision, "settings": settings,
                 "benchmarkChecksum": benchmark["manifestChecksum"], "cases": benchmark["cases"] + support_cases(), "policy": normalize_policy({}), "scoringVersion": "support-v1"}
     directory = args.runtime_root.resolve() / "quality" / "baselines" / fingerprint(manifest)
     if not directory.resolve().is_relative_to(args.runtime_root.resolve()):

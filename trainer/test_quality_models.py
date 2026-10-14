@@ -103,7 +103,7 @@ def test_generation_greedy_no_truncation_and_provenance(models, snapshot, monkey
         def eval(self):
             return self
         def generate(self, input_ids, **kwargs):
-            assert kwargs["do_sample"] is False and kwargs["max_new_tokens"] == 8
+            assert kwargs["do_sample"] is False and kwargs["max_new_tokens"] == 200
             return torch.tensor([input_ids[0].tolist() + [65, 2]])
     def load_tokenizer(path, **kwargs):
         assert Path(path) == snapshot and kwargs["local_files_only"] is True
