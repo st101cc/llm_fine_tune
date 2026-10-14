@@ -7,6 +7,7 @@ from functools import lru_cache
 from importlib.metadata import version
 
 VERSION = 'zh-TW-review-v1'
+CUSTOMER_TERM_REASON = 'Customer terminology preference; review context.'
 OPENCC_VERSION = '1.4.2'
 PROTECTED = re.compile(r'(?P<fence>`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^[ \t]*(?P=fence)[ \t]*$|\Z)|(?P<ticks>`+)(?!`)[\s\S]*?(?<!`)(?P=ticks)(?!`)|^(?: {4}|\t).*|https?://[^\s<>]+|「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|"(?:\\.|[^"\\])*"|\'[^\'\n]*\'', re.M)
 AMBIGUOUS = set('干面后里云台只斗余系松征谷范丑制复划冲于周布表向舍秋叶咸准出借回困才折据朱术朴杰板极柳核梁棉沈注汇汪泛泪洒淀游溪烟琅瓜画皂碱种秘群床峰粽庄晒痴霉虱灶昵肴羡痒')
@@ -68,7 +69,7 @@ def inspect_text(text, policy=None, *, cancelled=lambda: False):
             raise InterruptedError()
         if term != replacement:
             for match in re.finditer(re.escape(term), text):
-                add(match.start(), match.end(), replacement, 'terminology', 'Customer terminology preference; review context.')
+                add(match.start(), match.end(), replacement, 'terminology', CUSTOMER_TERM_REASON)
     protected.extend((i, i + 1) for i, ch in enumerate(text) if ch in AMBIGUOUS)
     for i, ch in enumerate(text):
         if ch in AMBIGUOUS:

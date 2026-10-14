@@ -292,6 +292,22 @@ class QualityStore:
                 db.execute('INSERT OR IGNORE INTO exceptions VALUES(?,?)', (audit['policy']['id'], term))
         return {'saved': len(decisions), 'exceptionsSaved': saved, 'message': 'Exceptions apply to new audits; existing evidence is unchanged.'}
 
+    def accept_customer_terms(self, audit_id, expected):
+        """Accept pending findings produced by the audit's own reviewed term list; explicit decisions stay."""
+        from quality_policy import CUSTOMER_TERM_REASON
+        audit, _ = self.checked(audit_id, expected)
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as db:
+            ids = []
+            for finding_id, body in db.execute("SELECT id, body FROM findings WHERE audit=? AND decision='pending'", (audit_id,)).fetchall():
+                finding = json.loads(body)
+                if finding['editable'] and finding['reason'] == CUSTOMER_TERM_REASON:
+                    ids.append(finding_id)
+            for finding_id in ids:
+                db.execute("UPDATE findings SET decision='accepted' WHERE audit=? AND id=?", (audit_id, finding_id))
+                db.execute('INSERT INTO review_history(audit,finding,decision,created) VALUES(?,?,?,?)', (audit_id, finding_id, 'accepted', now))
+        return {'saved': len(ids), 'terms': len(audit['policy']['terms']), 'message': f'Accepted {len(ids)} pending suggestions from the {len(audit["policy"]["terms"])}-term list. OpenCC suggestions and earlier decisions are unchanged.'}
+
     def materialize(self, audit_id, expected):
         audit, path = self.checked(audit_id, expected)
         with self.connection() as db:

@@ -86,3 +86,23 @@ def test_cancel_and_restart_never_report_pass_and_pagination_is_stable(tmp_path)
     first, second = store.findings(audit['id'], limit=2), store.findings(audit['id'], offset=2, limit=2)
     assert len(first['items']) == len(second['items']) == 2
     assert not ({f['id'] for f in first['items']} & {f['id'] for f in second['items']})
+
+
+def test_bulk_accept_applies_only_pending_term_list_findings(tmp_path):
+    rows = [{'prompt': 'a', 'completion': '這是數據'}, {'prompt': 'b', 'completion': '那是數據'}, {'prompt': 'c', 'completion': '软件'}]
+    store, path, ref = setup(tmp_path, rows)
+    audit = store.create_audit(ref, {'terms': {'數據': '資料'}}, 'full')
+    store.run_audit(audit['id'])
+    audit = store.get('audit', audit['id'])
+    findings = store.findings(audit['id'], limit=100)['items']
+    terms = [f for f in findings if f['original'] == '數據']
+    assert len(terms) == 2
+    store.review(audit['id'], audit['fingerprint'], [{'id': terms[1]['id'], 'decision': 'ignored'}])
+    result = store.accept_customer_terms(audit['id'], audit['fingerprint'])
+    assert result['saved'] == 1
+    decisions = {f['id']: f['decision'] for f in store.findings(audit['id'], limit=100)['items']}
+    assert decisions[terms[0]['id']] == 'accepted' and decisions[terms[1]['id']] == 'ignored'
+    assert all(d == 'pending' for i, d in decisions.items() if i not in (terms[0]['id'], terms[1]['id']))
+    version = store.materialize(audit['id'], audit['fingerprint'])
+    output = [json.loads(line) for line in store.export_path(version['id']).read_text(encoding='utf-8').splitlines()]
+    assert [r['completion'] for r in output] == ['這是資料', '那是數據', '软件']

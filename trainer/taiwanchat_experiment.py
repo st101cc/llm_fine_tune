@@ -15,7 +15,7 @@ from pathlib import Path
 from advisor import input_key
 from quality_models import TAIDE_ID, fingerprint, get_model_status, load_benchmark
 from quality_pilot import _runtime_directory, budget_status, generate_bounded, run_with_pilot_budget
-from quality_policy import inspect_text, row_problem
+from quality_policy import CUSTOMER_TERM_REASON, inspect_text, row_problem
 
 DATASET_ID = "yentinglin/TaiwanChat"
 DATASET_REVISION = "d766aa2cf5743aebfe3d91bbf141b3724de21a9b"
@@ -53,14 +53,14 @@ def approved_policy(terms_file):
 
 
 def apply_terms(text, policy):
-    findings = [f for f in inspect_text(text, policy) if f["reason"].startswith("Customer terminology")]
+    findings = [f for f in inspect_text(text, policy) if f["reason"] == CUSTOMER_TERM_REASON]
     for f in sorted(findings, key=lambda f: -f["start"]):
         text = text[:f["start"]] + f["replacement"] + text[f["end"]:]
     return text, [f["original"] for f in findings]
 
 
 def mainland_hits(text, policy):
-    return [f["original"] for f in inspect_text(text, policy) if f["reason"].startswith("Customer terminology")]
+    return [f["original"] for f in inspect_text(text, policy) if f["reason"] == CUSTOMER_TERM_REASON]
 
 
 def prepare(args):

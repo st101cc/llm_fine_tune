@@ -30,6 +30,7 @@ class ReviewRequest(StrictRequest):
     fingerprint: str = Field(min_length=64, max_length=64)
     decisions: list[dict] = Field(default_factory=list, max_length=500)
     exclusions: list[str] = Field(default_factory=list, max_length=1000)
+    acceptCustomerTerms: bool = False
 
 
 class VersionRequest(StrictRequest):
@@ -217,6 +218,10 @@ def install_quality_routes(app, get_root):
     @app.post('/quality/audits/{audit_id}/review')
     @guarded
     def review(audit_id: str, body: ReviewRequest):
+        if body.acceptCustomerTerms:
+            if body.decisions or body.exclusions:
+                raise ValueError('Bulk term acceptance cannot be combined with individual decisions or exclusions.')
+            return store().accept_customer_terms(audit_id, body.fingerprint)
         return store().review(audit_id, body.fingerprint, body.decisions, body.exclusions)
 
     @app.post('/quality/audits/{audit_id}/versions')
