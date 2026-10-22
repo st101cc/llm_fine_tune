@@ -94,3 +94,119 @@ def test_writing_sample_tokens_require_generation_and_reach_the_generator(tmp_pa
         assert response.status_code == 202, response.text
         record = finished(client, '/quality/evaluations/' + response.json()['id'])
     assert record['writingSampleTokens'] == 64 and seen['writing_sample_tokens'] == 64
+
+
+def reviewed_version(root, rows):
+    from quality_store import QualityStore
+    directory = root / 'datasets'
+    directory.mkdir(exist_ok=True)
+    path = directory / 'pair.jsonl'
+    path.write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rows), encoding='utf-8')
+    store = QualityStore(root)
+    audit = store.create_audit({'source': 'upload', 'name': str(path), 'extension': 'jsonl', 'displayName': 'pair'}, {'terms': {'數據': '資料'}}, 'full')
+    store.run_audit(audit['id'])
+    audit = store.get('audit', audit['id'])
+    store.accept_customer_terms(audit['id'], audit['fingerprint'])
+    return store, path, store.materialize(audit['id'], audit['fingerprint'])
+
+
+def character_tokens(monkeypatch):
+    import comparison_job
+    monkeypatch.setattr(comparison_job, 'taide_tokens', lambda row: len(json.dumps(row, ensure_ascii=False)))
+
+
+TINY = [{'prompt': 'a', 'completion': '這是數據'}, {'prompt': 'b', 'completion': '好'}]
+LARGE = [{'prompt': f'問題{i}', 'completion': '這是數據' if i % 2 else '好'} for i in range(300)]
+
+
+def test_estimate_and_bounds(tmp_path, monkeypatch):
+    character_tokens(monkeypatch)
+    _, _, version = reviewed_version(tmp_path, TINY)
+    client, _ = setup_client(tmp_path)
+    with client:
+        assert client.post('/quality/comparisons/estimate', json={'versionId': version['id'], 'epochs': 4}).status_code == 422
+        assert client.post('/quality/comparisons/estimate', json={'versionId': version['id'], 'trainRows': 50}).status_code == 422
+        response = client.post('/quality/comparisons/estimate', json={'versionId': version['id']})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body['feasible'] is False and body['split']['rows'] == 2
+        assert any('training rows' in r for r in body['split']['reasons'])
+        response = client.post('/quality/comparisons', json={'versionId': version['id']})
+        assert response.status_code == 422 and 'training rows' in response.json()['detail']
+        assert client.get('/quality/comparisons').json() == []
+
+
+def test_create_conflict_and_cancel(tmp_path, monkeypatch):
+    import threading
+    import comparison_job
+    character_tokens(monkeypatch)
+    started = threading.Event()
+
+    def blocking(store, root, comparison_id, stop, **_):
+        started.set()
+        stop.wait(10)
+        record = store.get('comparison', comparison_id)
+        record['status'] = 'cancelled' if record['status'] == 'cancelling' else 'running'
+        store.put('comparison', record)
+    monkeypatch.setattr(comparison_job, 'run_comparison', blocking)
+    _, _, version = reviewed_version(tmp_path, LARGE)
+    client, _ = setup_client(tmp_path)
+    with client:
+        estimate = client.post('/quality/comparisons/estimate', json={'versionId': version['id'], 'epochs': 1}).json()
+        assert estimate['feasible'] is True, estimate
+        response = client.post('/quality/comparisons', json={'versionId': version['id'], 'epochs': 1})
+        assert response.status_code == 202, response.text
+        record = response.json()
+        assert record['status'] == 'queued' and record['settings']['epochs'] == 1
+        assert started.wait(5)
+        conflict = client.post('/quality/comparisons', json={'versionId': version['id']})
+        assert conflict.status_code == 409 and conflict.json()['detail'] == 'Another comparison is running'
+        listed = client.get('/quality/comparisons').json()
+        assert [(c['id'], c['displayName'], c['headline']) for c in listed] == [(record['id'], version['dataset']['displayName'], None)]
+        url = '/quality/comparisons/' + record['id']
+        assert client.post(url + '/cancel').json()['status'] == 'cancelling'
+        for _ in range(150):
+            if client.get(url).json()['status'] == 'cancelled':
+                break
+            time.sleep(.03)
+        assert client.get(url).json()['status'] == 'cancelled'
+        export = client.get(url + '/export')
+        assert export.status_code == 200 and f'comparison-{record["id"]}.json' in export.headers['content-disposition']
+        assert export.json()['comparison']['id'] == record['id']
+
+
+def test_startup_resumes_running_comparison(tmp_path, monkeypatch):
+    import threading
+    import comparison_job
+    from quality_store import QualityStore
+    calls, stopped = [], []
+
+    def recording(store, root, comparison_id, stop, **_):
+        calls.append(comparison_id)
+        stopped.append(stop.wait(10))
+    monkeypatch.setattr(comparison_job, 'run_comparison', recording)
+    store = QualityStore(tmp_path)
+    running = store.put('comparison', comparison_job.new_record('v', {}) | {'status': 'running'})
+    cancelling = store.put('comparison', comparison_job.new_record('v', {}) | {'status': 'cancelling'})
+    store.put('comparison', comparison_job.new_record('v', {}) | {'status': 'complete'})
+    client, _ = setup_client(tmp_path)
+    with client:
+        for _ in range(100):
+            if len(calls) == 2:
+                break
+            time.sleep(.03)
+    assert sorted(calls) == sorted([running['id'], cancelling['id']])
+    assert stopped == [True, True]
+    assert store.get('comparison', running['id'])['status'] == 'running'
+
+
+def test_missing_source_is_422_not_503(tmp_path, monkeypatch):
+    character_tokens(monkeypatch)
+    _, path, version = reviewed_version(tmp_path, TINY)
+    path.unlink()
+    client, _ = setup_client(tmp_path)
+    with client:
+        for route in ('/quality/comparisons/estimate', '/quality/comparisons'):
+            response = client.post(route, json={'versionId': version['id']})
+            assert response.status_code == 422, response.text
+            assert response.json()['detail'] == 'Source dataset is missing; start a new audit.'

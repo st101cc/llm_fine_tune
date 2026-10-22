@@ -50,6 +50,17 @@ class EvaluationRequest(StrictRequest):
     writingSampleTokens: int | None = Field(default=None, ge=1, le=256)
 
 
+class ComparisonRequest(StrictRequest):
+    versionId: str
+    trainRows: int | None = Field(None, ge=100, le=5000)
+    editedShare: float = Field(0.5, ge=0, le=1)
+    epochs: int = Field(2, ge=1, le=3)
+    evalPrompts: int = Field(60, ge=20, le=200)
+
+
+ACTIVE_COMPARISON = ('queued', 'running', 'cancelling')
+
+
 def guarded(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
@@ -65,7 +76,7 @@ def guarded(function):
 
 
 def install_quality_routes(app, get_root):
-    stores, jobs = {}, {}
+    stores, jobs, comparisons = {}, {}, {}
     lock = threading.RLock()
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='quality')
 
@@ -95,15 +106,44 @@ def install_quality_routes(app, get_root):
         pool.submit(run)
         return record
 
+    def launch_comparison(target, comparison_id):
+        import comparison_job
+        event = threading.Event()
+
+        def run():
+            try:
+                comparison_job.run_comparison(target, target.root, comparison_id, event)
+            except Exception:
+                if not event.is_set():
+                    record = target.get('comparison', comparison_id)
+                    record.update(status='failed', message='Comparison job failed unexpectedly; check the backend log.')
+                    target.put('comparison', record)
+                raise
+            finally:
+                with lock:
+                    comparisons.pop(comparison_id, None)
+        thread = threading.Thread(target=run, daemon=True, name=f'comparison-{comparison_id}')
+        with lock:
+            comparisons[comparison_id] = (thread, event)
+        thread.start()
+
     @app.on_event('startup')
     def recover():
-        store()
+        target = store()
+        for record in target.list('comparison'):
+            if record['status'] in ACTIVE_COMPARISON:
+                launch_comparison(target, record['id'])
 
     @app.on_event('shutdown')
     def shutdown():
         with lock:
             for event in jobs.values():
                 event.set()
+            running = list(comparisons.values())
+        for thread, event in running:
+            event.set()
+        for thread, _ in running:
+            thread.join(timeout=2)
         pool.shutdown(wait=True)
         for item in stores.values():
             item.recover()
@@ -344,3 +384,74 @@ def install_quality_routes(app, get_root):
     def export_evaluation(evaluation_id: str):
         record = store().get('evaluation', evaluation_id)
         return StreamingResponse(iter([encoded(record)]), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="{record["id"]}-evaluation.json"'})
+
+    def plan_comparison(target, body):
+        import comparison_job
+        from comparison import estimate, load_pair, plan_split
+        from quality_pilot import budget_status
+        original, reviewed, _, version = load_pair(target, body.versionId)
+        split = plan_split(original, reviewed, comparison_job.taide_tokens, train_rows=body.trainRows,
+                           edited_share=body.editedShare, eval_prompts=body.evalPrompts)
+        plan = estimate(split, split['counts']['meanTrainTokens'], body.epochs, budget_status(target.root)['remainingGpuSeconds'])
+        return version, {'split': {**split['counts'], 'reasons': split['reasons']}, 'estimate': plan, 'feasible': plan['feasible']}
+
+    def comparison_active(target):
+        return any(record['status'] in ACTIVE_COMPARISON for record in target.list('comparison'))
+
+    @app.post('/quality/comparisons/estimate')
+    @guarded
+    def estimate_comparison(body: ComparisonRequest):
+        return plan_comparison(store(), body)[1]
+
+    @app.post('/quality/comparisons', status_code=202)
+    @guarded
+    def create_comparison(body: ComparisonRequest):
+        import comparison_job
+        target = store()
+        if comparison_active(target):
+            raise HTTPException(409, 'Another comparison is running')
+        version, plan = plan_comparison(target, body)
+        if not plan['feasible']:
+            raise ValueError('; '.join(plan['estimate']['reasons']))
+        record = comparison_job.new_record(version['id'], body.model_dump(exclude={'versionId'}))
+        record['displayName'] = version['dataset'].get('displayName', version['id'])
+        with lock:
+            if comparison_active(target):
+                raise HTTPException(409, 'Another comparison is running')
+            target.put('comparison', record)
+        launch_comparison(target, record['id'])
+        return record
+
+    @app.get('/quality/comparisons')
+    @guarded
+    def list_comparisons():
+        return [{'id': r['id'], 'versionId': r['versionId'], 'displayName': r.get('displayName'), 'status': r['status'],
+                 'createdAt': r['createdAt'], 'headline': (r.get('report') or {}).get('headline')} for r in store().list('comparison')]
+
+    @app.get('/quality/comparisons/{comparison_id}')
+    @guarded
+    def get_comparison(comparison_id: str):
+        return store().get('comparison', comparison_id)
+
+    @app.post('/quality/comparisons/{comparison_id}/cancel')
+    @guarded
+    def cancel_comparison(comparison_id: str):
+        record = store().cancel('comparison', comparison_id)
+        with lock:
+            job = comparisons.get(record['id'])
+        if job:
+            job[1].set()
+        return record
+
+    @app.get('/quality/comparisons/{comparison_id}/export')
+    @guarded
+    def export_comparison(comparison_id: str):
+        target = store()
+        record = target.get('comparison', comparison_id)
+        directory = target.directory / 'comparisons' / identifier(record['id'])
+        cases = directory / 'eval-cases.jsonl'
+        answers = {path.stem: json.loads(path.read_text(encoding='utf-8')) for path in sorted((directory / 'eval').glob('*.json'))}
+        body = {'comparison': {k: v for k, v in record.items() if k not in ('split', 'report')}, 'split': record.get('split'),
+                'evalCases': [json.loads(line) for line in cases.read_text(encoding='utf-8').splitlines() if line] if cases.is_file() else [],
+                'answers': answers, 'report': record.get('report')}
+        return StreamingResponse(iter([encoded(body)]), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="comparison-{record["id"]}.json"'})

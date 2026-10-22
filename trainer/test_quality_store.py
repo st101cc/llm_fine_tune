@@ -106,3 +106,12 @@ def test_bulk_accept_applies_only_pending_term_list_findings(tmp_path):
     version = store.materialize(audit['id'], audit['fingerprint'])
     output = [json.loads(line) for line in store.export_path(version['id']).read_text(encoding='utf-8').splitlines()]
     assert [r['completion'] for r in output] == ['這是資料', '那是數據', '软件']
+
+
+def test_recover_leaves_comparisons_resumable(tmp_path):
+    store, path, ref = setup(tmp_path, [{'text': '软件'}] * 5)
+    audit = store.create_audit(ref, {}, 'full')
+    comparison = store.put('comparison', {'id': '00000000-0000-4000-8000-000000000001', 'status': 'running'})
+    store.recover()
+    assert store.get('comparison', comparison['id'])['status'] == 'running'
+    assert store.get('audit', audit['id'])['status'] == 'interrupted'
