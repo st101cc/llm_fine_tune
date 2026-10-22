@@ -182,7 +182,7 @@ async function qualityComparisonStart(versionId) {
       if (result.feasible) { body = request; start.disabled = false; }
     } catch(error) { if (mine === ticket) show([error.message]); }
   };
-  form.oninput = form.onchange = () => { clearTimeout(qualityTimer); qualityTimer = setTimeout(estimate, 400); };
+  form.oninput = form.onchange = () => { body = null; start.disabled = true; ticket++; clearTimeout(qualityTimer); qualityTimer = setTimeout(estimate, 400); };
   form.onsubmit = async event => {
     event.preventDefault();
     if (!body || !confirm('Start the comparison? It trains two adapters and runs three evaluations on the GPU, charged to the shared ledger.')) return;
