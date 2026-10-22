@@ -20,6 +20,7 @@ SECONDS_PER_TOKEN_EPOCH = 0.0065
 EVAL_LOAD_SECONDS = 40
 MCQ_SECONDS = 1.5
 WRITING_SECONDS = 8
+ADAPTER_WRITING_SECONDS = 13
 RESERVATION_FACTOR = 1.5
 PER_RUN_CAP = 1800
 MCQ_CASES = 30
@@ -139,19 +140,22 @@ def plan_split(original, reviewed, token_count, *, train_rows=None, edited_share
 
 def estimate(split, mean_train_tokens, epochs, ledger_remaining):
     train = TRAIN_LOAD_SECONDS + SECONDS_PER_TOKEN_EPOCH * mean_train_tokens * len(split["train"]) * epochs
-    evaluate = EVAL_LOAD_SECONDS + MCQ_SECONDS * MCQ_CASES + WRITING_SECONDS * len(split["eval"])
-    reserve = {"train": min(PER_RUN_CAP, math.ceil(train * RESERVATION_FACTOR)),
-               "evaluate": min(PER_RUN_CAP, math.ceil(evaluate * RESERVATION_FACTOR))}
+    fixed = EVAL_LOAD_SECONDS + MCQ_SECONDS * MCQ_CASES
+    base = fixed + WRITING_SECONDS * len(split["eval"])
+    adapter = fixed + ADAPTER_WRITING_SECONDS * len(split["eval"])
+    uncapped = {"evaluate-base": math.ceil(base * RESERVATION_FACTOR), "evaluate-adapter": math.ceil(adapter * RESERVATION_FACTOR)}
+    reserve = {"train": min(PER_RUN_CAP, math.ceil(train * RESERVATION_FACTOR)), **{k: min(PER_RUN_CAP, v) for k, v in uncapped.items()}}
     reasons = list(split["reasons"])
     if train > PER_RUN_CAP:
         reasons.append(f"one training run would take about {math.ceil(train)} s, over the {PER_RUN_CAP} s per-run cap; use fewer rows or epochs")
-    if evaluate > PER_RUN_CAP:
-        reasons.append(f"one evaluation would take about {math.ceil(evaluate)} s, over the {PER_RUN_CAP} s per-run cap; use fewer evaluation prompts")
-    needed = 2 * reserve["train"] + 3 * reserve["evaluate"]
+    for kind, label in (("evaluate-base", "base"), ("evaluate-adapter", "adapter")):
+        if uncapped[kind] > PER_RUN_CAP:
+            reasons.append(f"the {label} evaluation step would reserve {uncapped[kind]} s, over the {PER_RUN_CAP} s per-run cap; use fewer evaluation prompts")
+    needed = 2 * reserve["train"] + reserve["evaluate-base"] + 2 * reserve["evaluate-adapter"]
     if needed > ledger_remaining:
         reasons.append(f"GPU ledger has {math.ceil(ledger_remaining)} s left; this comparison reserves {needed} s")
-    return {"trainSecondsPerRun": math.ceil(train), "evalSecondsPerModel": math.ceil(evaluate),
-            "totalGpuSeconds": math.ceil(2 * train + 3 * evaluate), "wallClockSeconds": math.ceil(train + 2 * evaluate),
+    return {"trainSecondsPerRun": math.ceil(train), "evalSecondsBase": math.ceil(base), "evalSecondsAdapter": math.ceil(adapter),
+            "totalGpuSeconds": math.ceil(2 * train + base + 2 * adapter), "wallClockSeconds": math.ceil(train + 2 * adapter),
             "stepMaxSeconds": reserve, "feasible": not reasons, "reasons": reasons,
             "ledgerRemaining": ledger_remaining, "perRunCap": PER_RUN_CAP}
 

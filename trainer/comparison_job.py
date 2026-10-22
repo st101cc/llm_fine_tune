@@ -159,7 +159,7 @@ def run_comparison(store, root, comparison_id, stop, *, gpus=idle_gpus, train=ru
 
     def evaluate_step(step, gpu):
         model = step["name"].removeprefix("evaluate-")
-        need = ledger_check("evaluate")
+        need = ledger_check("evaluate-base" if model == "base" else "evaluate-adapter")
         adapter = None if model == "base" else run_dir(model) / "adapter"
         remaining = load_benchmark(record["benchmarkRevision"], runtime_root=root)["cases"] + read_jsonl(directory / "eval-cases.jsonl")
         answers, over_limit, attempts, failure = [], [], [], None
@@ -189,7 +189,7 @@ def run_comparison(store, root, comparison_id, stop, *, gpus=idle_gpus, train=ru
         losses = {}
         for variant in ("original", "reviewed"):
             metrics = json.loads((run_dir(variant) / "metrics.json").read_text(encoding="utf-8"))
-            losses[variant] = metrics.get("train_loss", metrics.get("eval_loss"))
+            losses[variant] = metrics.get("train_loss")
         mcq = load_benchmark(record["benchmarkRevision"], runtime_root=root)["cases"]
         report = build_report(answers, read_jsonl(directory / "eval-cases.jsonl"), mcq, record["policy"], losses)
         record["report"] = {**report, "runs": {v: steps[f"train-{v}"]["runId"] for v in ("original", "reviewed")}}

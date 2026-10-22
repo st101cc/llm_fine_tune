@@ -1,4 +1,5 @@
 import json
+import math
 
 import pytest
 
@@ -65,7 +66,7 @@ def test_eval_rows_are_edited_single_turn_and_never_trained():
 def test_minimums_and_reasons():
     original, reviewed = pair(8, 400)
     result = estimate(plan_split(original, reviewed, tokens), 100, 2, 15000)
-    assert not result["feasible"] and any("8" in r for r in result["reasons"])
+    assert not result["feasible"] and "only 8 evaluation prompts; at least 20 are needed" in result["reasons"]
     multi = [{"messages": [{"role": "user", "content": f"q{i}"}, {"role": "assistant", "content": "a"}, {"role": "user", "content": "b"}, {"role": "assistant", "content": "舊"}]} for i in range(300)]
     edited = [{"messages": r["messages"][:-1] + [{"role": "assistant", "content": "新"}]} for r in multi]
     assert "no edited row has a single-turn prompt to evaluate" in plan_split(multi, edited, tokens)["reasons"]
@@ -104,6 +105,24 @@ def test_estimate_refuses_per_run_cap_and_ledger():
     assert light["feasible"] and light["stepMaxSeconds"]["train"] <= 1800
     tight = estimate(split, 100, 1, light["totalGpuSeconds"] - 1)
     assert not tight["feasible"] and any("ledger" in r for r in tight["reasons"])
+
+
+def test_estimate_reserves_more_for_adapter_evals():
+    original, reviewed = pair(100, 400)
+    result = estimate(plan_split(original, reviewed, tokens), 100, 1, 15000)
+    base, adapter = result["evalSecondsBase"], result["evalSecondsAdapter"]
+    assert (base, adapter) == (40 + 45 + 8 * 60, 40 + 45 + 13 * 60)
+    reserve = result["stepMaxSeconds"]
+    assert reserve["evaluate-base"] == min(1800, math.ceil(base * 1.5)) == 848
+    assert reserve["evaluate-adapter"] == min(1800, math.ceil(adapter * 1.5)) == 1298
+    assert abs(result["totalGpuSeconds"] - (2 * result["trainSecondsPerRun"] + base + 2 * adapter)) <= 2
+
+
+def test_estimate_refuses_eval_that_cannot_fit_cap():
+    original, reviewed = pair(300, 400)
+    result = estimate(plan_split(original, reviewed, tokens, eval_prompts=200), 100, 1, 15000)
+    assert not result["feasible"]
+    assert "the adapter evaluation step would reserve 4028 s, over the 1800 s per-run cap; use fewer evaluation prompts" in result["reasons"]
 
 
 def test_policy_hits_separates_terms_and_opencc():

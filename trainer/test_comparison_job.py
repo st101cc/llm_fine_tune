@@ -50,7 +50,7 @@ class Fakes:
 
     def generate(self, cases, *, runtime_root, adapter_path, cancelled, max_seconds, revision, load_mode, writing_sample_tokens, gpu):
         assert load_mode == "bnb4" and writing_sample_tokens == 128 and revision == "a" * 40
-        self.generated.append((adapter_path, gpu, [c["id"] for c in cases]))
+        self.generated.append((adapter_path, gpu, [c["id"] for c in cases], max_seconds))
         return {"status": "complete", "answers": [{"caseId": c["id"], "output": "A 這是數據"} for c in cases], "run": {"chargedGpuSeconds": 3}}
 
     def run(self, store, root, comparison_id, stop=None):
@@ -76,6 +76,10 @@ def test_happy_path_parallel_training_on_distinct_gpus(tmp_path):
     assert [g[0] is None for g in fakes.generated].count(True) == 1 and len(fakes.generated) == 3
     assert (tmp_path / "quality" / "comparisons" / cid / "eval" / "reviewed.json").is_file()
     assert record["steps"][1]["gpuSeconds"] == 7
+    reserve = record["estimate"]["stepMaxSeconds"]
+    assert reserve["evaluate-adapter"] > reserve["evaluate-base"]
+    assert sorted(g[3] for g in fakes.generated) == sorted([reserve["evaluate-base"]] + [reserve["evaluate-adapter"]] * 2)
+    assert [g[3] for g in fakes.generated if g[0] is None] == [reserve["evaluate-base"]]
 
 
 def test_single_gpu_runs_sequentially(tmp_path):
