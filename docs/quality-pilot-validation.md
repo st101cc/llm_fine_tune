@@ -100,9 +100,9 @@ Setup: `yentinglin/TaiwanChat` at `d766aa2cf5743aebfe3d91bbf141b3724de21a9b`; 4,
 | TMMLU+ correct | 8 / 30 (27%) | 7 / 29 (24%) | 8 / 30 (27%) |
 | Training loss | - | 1.48 | 1.47 |
 
-Paired prompts: original used a listed term and reviewed did not on 30 of 60; the reverse on 0; both on 4; neither on 26.
+Paired prompts: original used a listed term and reviewed did not on 30 of 60; the reverse on 0; both on 4; neither on 26. Term counts here (and in the CLI since this branch) include only editable term-list findings, so terms inside quotes or code are excluded and figures can differ slightly from the 2026-10-14 CLI method.
 
-GPU-seconds: 5,028 of the 15,000 ledger (estimate 4,709): training 1,447 + 1,442, evaluation 533 + 833 + 773. Wall clock about 53 minutes. Ledger remaining afterwards: 4,274 s.
+GPU-seconds: 5,028 of the 15,000 ledger (estimate 4,709): training 1,447 + 1,442, evaluation 533 + 833 + 773. Wall clock 51 minutes (job 08:52:20 to 09:43:17 UTC). Ledger remaining afterwards: 4,274 s.
 
 Reading: training on original answers raised mainland-term use well above base; training on reviewed answers cut it to near zero without a visible TMMLU+ change.
 

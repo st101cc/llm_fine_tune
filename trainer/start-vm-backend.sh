@@ -19,5 +19,5 @@ PY=.venv/bin/python
 [ -x "$PY" ] || PY=.venv311/bin/python
 # Async LangGraph review checkpoints require Python 3.11+ on this deployment.
 "$PY" -c "import sys; assert sys.version_info >= (3, 11), 'Python 3.11+ is required'"
-nohup "$PY" -m uvicorn app:app --app-dir trainer --host 127.0.0.1 --port 18000 > "$FORGETUNE_DATA_ROOT/logs/backend.log" 2>&1 < /dev/null &
+nohup "$PY" -m uvicorn app:app --app-dir trainer --host 127.0.0.1 --port 18000 >> "$FORGETUNE_DATA_ROOT/logs/backend.log" 2>&1 < /dev/null &
 echo "Started backend PID $!"
