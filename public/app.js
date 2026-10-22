@@ -574,6 +574,7 @@ function render() {
   setNav(); const [page, id] = route().split("/");
   if (page === "quality") qualityPage(id);
   else if (page === "quality-evaluations") qualityEvaluations(id);
+  else if (page === "quality-comparisons") qualityComparisons(id, route().split("/")[2]);
   else if (page === "configure") configure();
   else if (page === "workflow") workflowPage(id);
   else if (page === "train") train(id);
