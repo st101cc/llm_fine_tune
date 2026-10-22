@@ -85,3 +85,25 @@ The requested three-tier evaluation concept is only partially covered: native au
 Existing dirty tracked Python cache files and an unrelated pre-existing trailing-space finding remain untouched. The passing test suite does not constitute a clean repository, a deployment, or completion of the blocked live model checks.
 
 See `quality-pilot-operations.md` for usage and `quality-evaluation-report.md` for detailed model/evaluation contracts and test evidence.
+
+## 2026-10-22: TaiwanChat original-vs-reviewed comparison through the UI
+
+This run supersedes the 2026-10-14 CLI result, which was affected by a data bug (`算法` was replaced twice, producing `演演算法`). The term list now has the 算法→演算法 overlap fixed and adds 大數據→巨量資料.
+
+Setup: `yentinglin/TaiwanChat` at `d766aa2cf5743aebfe3d91bbf141b3724de21a9b`; 4,000 single-turn rows (shuffle seed 42, full chat-template tokens <= 480, deduplicated). Audit of all 4,000 rows with the 39-term list and two protected phrases found 5,155 findings; "Accept all term-list suggestions" accepted 1,283 (assistant answers only), giving reviewed version 18b4b6a8 with 409 edited rows. Comparison 9ed7a2c3 used the defaults: 500 training rows per run (250 edited, 50%), 2 epochs, 60 evaluation prompts (taken from edited rows), 30 TMMLU+ questions, TAIDE 4-bit QLoRA, split seed 42.
+
+| Measure | Base | Original-trained | Reviewed-trained |
+|---|---|---|---|
+| Listed terms per 1,000 chars | 2.6 | 8.3 | 0.4 |
+| OpenCC suggestions per 1,000 chars | 2.4 | 6.0 | 4.9 |
+| Answers with any listed term | 18 / 60 | 34 / 60 | 4 / 60 |
+| TMMLU+ correct | 8 / 30 (27%) | 7 / 29 (24%) | 8 / 30 (27%) |
+| Training loss | - | 1.48 | 1.47 |
+
+Paired prompts: original used a listed term and reviewed did not on 30 of 60; the reverse on 0; both on 4; neither on 26.
+
+GPU-seconds: 5,028 of the 15,000 ledger (estimate 4,709): training 1,447 + 1,442, evaluation 533 + 833 + 773. Wall clock about 53 minutes. Ledger remaining afterwards: 4,274 s.
+
+Reading: training on original answers raised mainland-term use well above base; training on reviewed answers cut it to near zero without a visible TMMLU+ change.
+
+Limitations: single seed and one run per variant; evaluation prompts are targeted at rows the review edited, so rates are not representative of general use; writing samples are truncated at 128 tokens (most answers cut off); small n (60 prompts, 30 TMMLU+ questions, so TMMLU+ differences are within noise; one original-trained answer was unparsed); OpenCC suggestions are not errors. The data is TaiwanChat (CC-BY-NC-4.0): internal research only, no redistribution of the subset or adapters.
