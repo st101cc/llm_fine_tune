@@ -434,3 +434,25 @@ def test_busy_between_phases_does_not_refund_previous_gpu_use(pilot, tmp_path, m
     result = pilot.run_with_pilot_budget(tmp_path, [["fixture"], ["fixture"]], max_seconds=100)
     assert result["status"] == "unavailable"
     assert result["budget"]["chargedGpuSeconds"] == 10
+
+
+def test_idle_gpus_lists_only_idle_large_enough(pilot, monkeypatch):
+    def query(command, **kwargs):
+        if "--query-gpu=uuid,memory.free" in command:
+            device = command[command.index("-i") + 1]
+            return f"{device}, 30000\n"
+        if "--query-gpu=uuid" in command:
+            return "GPU-a\nGPU-b\n"
+        return "123\n" if command[command.index("-i") + 1] == "GPU-a" else ""
+    monkeypatch.setattr(subprocess, "check_output", query)
+    assert pilot.idle_gpus() == ["GPU-b"]
+
+
+def test_generate_bounded_pins_requested_gpu(pilot, models, snapshot, tmp_path, monkeypatch):
+    seen = {}
+    def capture(root, commands, **kwargs):
+        seen.update(kwargs)
+        return {"status": "failed", "message": "stub", "budget": pilot.budget_status(tmp_path)}
+    monkeypatch.setattr(importlib.import_module("quality_pilot"), "run_with_pilot_budget", capture)
+    pilot.generate_bounded([{"id": "x", "input": "Q", "task": "mcq"}], runtime_root=tmp_path, load_mode="bnb4", gpu="GPU-b")
+    assert seen["gpu"] == "GPU-b"
