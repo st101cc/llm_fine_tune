@@ -40,9 +40,14 @@ def test_quality_qlora_training_requests_bnb4_admission(tmp_path, monkeypatch):
     assert seen['load_mode'] == 'bnb4'
 
 
-def test_cancel_managed_run_returns_409(monkeypatch):
+def test_cancel_managed_run_returns_409(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
+    writes = []
     monkeypatch.setattr(app, 'read_run', lambda _: {'id': 'r1', 'status': 'running', 'managedBy': 'cmp-1'})
+    monkeypatch.setattr(app, 'write_run', writes.append)
+    monkeypatch.setattr(app, 'run_path', lambda _: tmp_path / 'run.json')
+    monkeypatch.setattr(app, 'DATA_ROOT', tmp_path)
     response = TestClient(app.app).post('/runs/r1/cancel')
     assert response.status_code == 409
     assert 'comparison cmp-1' in response.json()['detail']
+    assert writes == []
