@@ -15,7 +15,7 @@ from pathlib import Path
 from advisor import input_key
 from quality_models import TAIDE_ID, fingerprint, get_model_status, load_benchmark
 from quality_pilot import _runtime_directory, budget_status, generate_bounded, run_with_pilot_budget
-from comparison import policy_hits, scoring_policy
+from comparison import leading_letter, policy_hits, scoring_policy
 from quality_policy import CUSTOMER_TERM_REASON, inspect_text, row_problem
 
 DATASET_ID = "yentinglin/TaiwanChat"
