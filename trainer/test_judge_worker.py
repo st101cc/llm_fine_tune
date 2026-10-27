@@ -56,6 +56,37 @@ def test_grade_items_propagates_call_failures_and_resumes(tmp_path):
     assert [row["itemId"] for row in lines(out)] == ["c0|base", "c1|base", "c2|base"]
 
 
+def test_grade_items_repairs_torn_trailing_line(tmp_path):
+    out, calls = tmp_path / "grades.jsonl", []
+    valid = json.dumps({"itemId": "c0|base", "vote": {"error": "invalid_output"}}) + "\n"
+    out.write_bytes((valid + '{"itemId": "c1|ba').encode("utf-8"))
+    def call(text):
+        calls.append(text)
+        return GOOD
+    assert jp.grade_items(make_items(3), call, out, "none") == 2
+    rows = lines(out)
+    assert [row["itemId"] for row in rows] == ["c0|base", "c1|base", "c2|base"]
+    assert rows[0]["vote"] == {"error": "invalid_output"} and len(calls) == 2
+    assert out.read_bytes().endswith(b"\n")
+
+
+def test_grade_items_drops_torn_line_without_any_newline(tmp_path):
+    out = tmp_path / "grades.jsonl"
+    out.write_bytes(b'{"itemId": "c0|b')
+    assert jp.grade_items(make_items(1), lambda text: GOOD, out, "none") == 1
+    assert [row["itemId"] for row in lines(out)] == ["c0|base"]
+
+
+def test_judge_bounded_counts_only_complete_lines(tmp_path, monkeypatch):
+    fake_status(monkeypatch)
+    grades = tmp_path / "quality" / "g.jsonl"
+    def run(root, commands, **kwargs):
+        grades.write_bytes(b'{"itemId": "a", "vote": {}}\n{"itemId": "b", "vo')
+        return {"status": "cancelled", "message": "m", "budget": {}}
+    monkeypatch.setattr(qp, "run_with_pilot_budget", run)
+    assert bounded(tmp_path, grades_path=grades)["graded"] == 1
+
+
 def test_grade_items_stops_when_cancelled(tmp_path):
     out, flags = tmp_path / "grades.jsonl", iter([False, False, True])
     assert jp.grade_items(make_items(5), lambda text: GOOD, out, "none", cancelled=lambda: next(flags)) == 2

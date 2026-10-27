@@ -132,7 +132,14 @@ OVERLONG = json.dumps({part: {"verdict": "abstain", "reason": "Question, referen
 def grade_items(items, call, out_path, reference_mode, cancelled=lambda: False):
     """Append one {"itemId", "vote"} line per ungraded item, resuming from out_path. Failures of call() propagate."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    done = {json.loads(line)["itemId"] for line in out_path.read_text(encoding="utf-8").splitlines() if line} if out_path.is_file() else set()
+    done = set()
+    if out_path.is_file():
+        data = out_path.read_bytes()
+        complete = data[:data.rfind(b"\n") + 1]
+        if len(complete) != len(data):
+            with out_path.open("r+b") as torn:
+                torn.truncate(len(complete))
+        done = {json.loads(line)["itemId"] for line in complete.decode("utf-8").splitlines() if line}
     graded = 0
     with out_path.open("a", encoding="utf-8") as out:
         for item in items:

@@ -211,7 +211,7 @@ def judge_bounded(items, *, runtime_root, judge, grades_path, reference_mode, ca
     if not grades_path.is_relative_to(root):
         raise ValueError("Grades path escapes runtime area")
     def count():
-        return sum(1 for line in grades_path.read_text(encoding="utf-8").splitlines() if line) if grades_path.is_file() else 0
+        return grades_path.read_bytes().count(b"\n") if grades_path.is_file() else 0
     status = judge_status(runtime_root)[judge]
     if status["status"] != "ready":
         return {"status": "unavailable", "reason": "missing_weights", "graded": count(), "run": None, "budget": budget_status(runtime_root)}
