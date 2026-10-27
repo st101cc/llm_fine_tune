@@ -66,9 +66,12 @@ const incomplete = {...report, candidates: {base: {correctness: empty, language:
     await page.getByText('12 of 20 graded').first().waitFor();
     current = {...record, status: 'complete', steps: steps(true, 20), report};
     await page.getByText('Estimated by local models, not verified').waitFor({timeout: 10000});
-    await page.getByText('18 of 20 graded').waitFor();
-    await page.getByText('16 of 20 graded').waitFor();
+    await page.getByText('18 of 20 graded').first().waitFor();
+    await page.getByText('16 of 20 graded').first().waitFor();
     await page.getByText('63%').first().waitFor();
+    const bars = page.locator('.quality-bars-coverage .quality-bar');
+    assert.equal(await bars.count(), 4);
+    for (const text of await bars.allInnerTexts()) assert(/\d+ of \d+ graded/.test(text), text);
     await page.getByText('Uses 软件 where Taiwan usage is 軟體').waitFor();
     await page.getByText('No grade (invalid_output)').waitFor();
     assert.equal(await page.getByText('Human agreement').count(), 0);

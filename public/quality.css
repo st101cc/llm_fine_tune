@@ -6,7 +6,7 @@
 .quality-diff {display:grid;grid-template-columns:1fr 1fr;gap:20px}
 .quality-panel pre {white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-family:Consolas,monospace}
 #quality-error {color:var(--amber);white-space:pre-wrap}
-@media(max-width:700px){.quality-diff {grid-template-columns:1fr}}
+@media(max-width:700px){.quality-bars-coverage .quality-bar {grid-template-columns:92px minmax(0,1fr) 84px}.quality-diff {grid-template-columns:1fr}}
 .quality-panel .form-row {margin:12px 0 4px}
 .quality-estimate {margin:16px 0;padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--bg);line-height:1.55}
 .quality-facts {display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
@@ -33,6 +33,9 @@
 .quality-bars {display:grid;gap:10px;margin:14px 0;max-width:640px}
 .quality-bar {display:grid;grid-template-columns:130px minmax(0,1fr) 48px;align-items:center;gap:10px;font-size:12px}
 .quality-bar strong {font:13px "DM Mono",monospace;text-align:right}
+.quality-bars-coverage .quality-bar {grid-template-columns:130px minmax(0,1fr) 150px}
+.quality-bar-value {display:flex;justify-content:flex-end;align-items:baseline;gap:6px;flex-wrap:wrap}
+.quality-bar-value small {color:var(--muted);font-size:10px}
 .quality-bar-track {height:18px;border-left:1px solid var(--line)}
 .quality-bar-track i {display:block;height:100%;min-width:2px;border-radius:0 4px 4px 0;background:var(--blue)}
 .quality-example {padding:16px 0;border-bottom:1px solid var(--line)}
