@@ -288,6 +288,25 @@ def test_panel_estimate_for_evaluation_flags_uploaded_answers(tmp_path, judges):
         assert body['selfGrading'] == {'Qwen2.5-7B@base': 'qwen'}
 
 
+def test_panel_estimate_refuses_while_comparison_runs(tmp_path, judges):
+    import comparison_job
+    store, comparison_id, client = panel_client(tmp_path)
+    store.put('comparison', comparison_job.new_record('v', {}) | {'status': 'running'})
+    with client:
+        body = client.post('/quality/panels/estimate', json={'source': {'comparisonId': comparison_id}}).json()
+        assert body['feasible'] is False and body['estimate']['feasible'] is False
+        assert body['reasons'] == ['a comparison is running; wait for it to finish']
+
+
+def test_panel_estimate_refuses_while_panel_runs(tmp_path, judges):
+    import panel_job
+    store, comparison_id, client = panel_client(tmp_path)
+    store.put('panel', panel_job.new_record({'comparisonId': comparison_id}, 20, 'other') | {'status': 'running'})
+    with client:
+        body = client.post('/quality/panels/estimate', json={'source': {'comparisonId': comparison_id}}).json()
+        assert body['feasible'] is False and body['reasons'] == ['a judge panel is running; wait for it to finish']
+
+
 def test_panel_and_comparison_are_mutually_exclusive(tmp_path, judges):
     import comparison_job
     from quality_store import QualityStore

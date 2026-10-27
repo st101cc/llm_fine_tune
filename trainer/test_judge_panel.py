@@ -112,7 +112,7 @@ def test_comparison_source_drops_reference_and_keeps_truncated(tmp_path):
     cid = make_comparison(store)
     source = jp.load_source(store, {"comparisonId": cid})
     assert source["kind"] == "comparison" and source["id"] == cid and source["referenceMode"] == "none"
-    assert source["cases"] == [{"id": f"row:{i}", "input": f"問題{i}", "reference": None} for i in range(3)]
+    assert source["cases"] == [{"id": f"row:{i}", "input": f"問題{i}", "reference": None} for i in range(3)] and source["truncatedUnknown"] is False
     assert len(source["answers"]) == 9
     assert {a["candidate"] for a in source["answers"]} == {"base", "original", "reviewed"}
     assert all(a["caseId"].startswith("row:") and a["human"] is None for a in source["answers"])
@@ -151,12 +151,22 @@ def test_evaluation_source_uses_writing_only_and_defaults_truncated_false(tmp_pa
     assert source["kind"] == "evaluation" and source["referenceMode"] == "case"
     assert source["cases"] == [{"id": "w1", "input": "寫一封信", "reference": "範例"}, {"id": "w2", "input": "寫詩", "reference": None}]
     assert sorted((a["caseId"], a["candidate"]) for a in source["answers"]) == [("w1", "Qwen2.5-7B@base"), ("w1", "mine"), ("w2", "Qwen2.5-7B@base"), ("w2", "mine")]
-    assert not any(a["truncated"] for a in source["answers"])
+    assert not any(a["truncated"] for a in source["answers"]) and source["truncatedUnknown"] is True
     human = {(a["caseId"], a["candidate"]): a["human"] for a in source["answers"]}
     assert human[("w1", "mine")] is True and human[("w2", "mine")] is None and human[("w1", "Qwen2.5-7B@base")] is False
     flagged = jp.load_source(store, {"evaluationId": make_evaluation(store, generated_truncated=True)})
     assert {(a["caseId"], a["candidate"]): a["truncated"] for a in flagged["answers"]}[("w1", "mine")] is True
     assert {(a["caseId"], a["candidate"]): a["truncated"] for a in flagged["answers"]}[("w1", "Qwen2.5-7B@base")] is False
+
+
+def test_generated_answers_without_truncated_flag_are_known(tmp_path):
+    store = QualityStore(tmp_path)
+    eid = make_evaluation(store)
+    record = store.get("evaluation", eid)
+    record["generation"] = {"answers": [{"caseId": c, "candidate": n} for c in ("w1", "w2") for n in ("mine", "Qwen2.5-7B@base")]}
+    store.put("evaluation", record)
+    source = jp.load_source(store, {"evaluationId": eid})
+    assert source["truncatedUnknown"] is False and not any(a["truncated"] for a in source["answers"])
 
 
 def test_source_without_writing_answers_is_refused(tmp_path):
@@ -197,7 +207,7 @@ def test_estimate_default_comparison():
     result = jp.estimate(60, 4274, READY)
     assert result["feasible"] and result["reasons"] == []
     assert result["chunksPerJudge"] == 1 and result["gradesPerJudge"] == 60 and result["ledgerRemaining"] == 4274
-    assert result["gpuSeconds"] == 3 * (60 * 12 + 90)
+    assert result["gpuSeconds"] == 3 * math.ceil(810 * 1.5) == 3645
 
 
 def test_estimate_refuses_missing_judge_and_short_ledger():
@@ -205,16 +215,17 @@ def test_estimate_refuses_missing_judge_and_short_ledger():
     assert not result["feasible"]
     assert "qwen: missing_weights" in result["reasons"]
     assert any(r.startswith("GPU ledger has 100 s left; this panel needs") for r in result["reasons"])
+    assert "GPU ledger has 100 s left; this panel needs 3645 s" in jp.estimate(60, 100.9, READY)["reasons"]
     assert "yi: missing_weights" in jp.estimate(60, 99999, {"breeze": True, "qwen": True})["reasons"]
 
 
 def test_estimate_chunks_large_selection():
     result = jp.estimate(180, 10 ** 6, READY)
-    chunks = math.ceil(180 / jp.chunk_size())
-    assert jp.chunk_size() == (jp.MAX_RUN_SECONDS - jp.LOAD_SECONDS) // jp.SECONDS_PER_GRADE
-    assert result["chunksPerJudge"] == chunks == 2
-    assert result["gpuSeconds"] == 3 * (180 * jp.SECONDS_PER_GRADE + chunks * jp.LOAD_SECONDS)
-    assert jp.LOAD_SECONDS + jp.chunk_size() * jp.SECONDS_PER_GRADE <= jp.MAX_RUN_SECONDS
+    assert jp.RESERVATION_FACTOR is __import__("comparison").RESERVATION_FACTOR
+    assert jp.chunk_size() == 92 and math.ceil(180 / jp.chunk_size()) == result["chunksPerJudge"] == 2
+    assert jp.chunk_seconds(92) == math.ceil((90 + 92 * 12) * 1.5) == 1791 <= jp.MAX_RUN_SECONDS
+    assert jp.chunk_seconds(150) == jp.MAX_RUN_SECONDS
+    assert result["gpuSeconds"] == 3 * (jp.chunk_seconds(92) + jp.chunk_seconds(88)) == 3 * (1791 + 1719)
 
 
 def items_for(candidates, cases):

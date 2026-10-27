@@ -29,7 +29,7 @@ class Judge:
     def __init__(self, gpus=("GPU-a", "GPU-b"), hook=None):
         self.gpus, self.hook, self.calls, self.lock = list(gpus), hook, [], threading.Lock()
 
-    def __call__(self, items, *, runtime_root, judge, grades_path, reference_mode, cancelled, max_seconds, gpu):
+    def __call__(self, items, *, runtime_root, judge, grades_path, reference_mode, cancelled, max_seconds, gpu, revision):
         start = time.monotonic()
         result = self.hook(judge, items, grades_path) if self.hook else None
         if result is None:
@@ -38,7 +38,7 @@ class Judge:
             result = {"status": "complete", "graded": 0, "run": {"chargedGpuSeconds": 5}, "budget": {}}
         with self.lock:
             self.calls.append({"judge": judge, "ids": [i["itemId"] for i in items], "gpu": gpu, "max_seconds": max_seconds,
-                               "start": start, "end": time.monotonic(), "reference_mode": reference_mode})
+                               "start": start, "end": time.monotonic(), "reference_mode": reference_mode, "revision": revision})
         return result
 
     def run(self, store, root, panel_id, stop=None):
@@ -75,6 +75,9 @@ def test_panel_runs_all_judges_and_reports(tmp_path):
     assert record["sourceFingerprint"] == panel_job.digest(items) and record["referenceMode"] == "none"
     assert record["judgeRevisions"] == REVISIONS and record["evaluatorId"] == panel_job.evaluator_id(REVISIONS, "none")
     assert record["selfGrading"] == {} and {c["reference_mode"] for c in fake.calls} == {"none"}
+    assert {c["judge"]: c["revision"] for c in fake.calls} == REVISIONS
+    assert record["truncatedItems"] == 20 and record["truncatedUnknown"] is False
+    assert {c["max_seconds"] for c in fake.calls} == {panel_job.chunk_seconds(60)} == {1215}
     protocol = record["protocol"]
     assert set(protocol) == {"panelVersion", "aggregationRule", "system", "correctnessRubric", "languageRubric", "truncationRule"}
     assert protocol["panelVersion"] == "judge-panel-v1" and protocol["system"] == panel_job.SYSTEM and "reference" not in protocol["correctnessRubric"].lower()
@@ -87,6 +90,7 @@ def test_evaluation_source_freezes_human_and_reports_agreement(tmp_path):
     store, pid = setup(tmp_path, source=lambda store: {"evaluationId": make_evaluation(store)})
     record = Judge().run(store, tmp_path, pid)
     assert record["status"] == "complete" and record["referenceMode"] == "case"
+    assert record["truncatedItems"] == 0 and record["truncatedUnknown"] is True
     assert record["selfGrading"] == {"Qwen2.5-7B@base": "qwen"}
     assert record["protocol"]["correctnessRubric"] == panel_job.CORRECTNESS_RUBRIC("case") and "reference" in record["protocol"]["correctnessRubric"]
     assert record["report"]["humanAgreement"] == {"compared": 2, "agreed": 1}
@@ -126,7 +130,7 @@ def test_large_selection_is_chunked(tmp_path, monkeypatch):
         calls = fake.judged(name)
         assert [len(c["ids"]) for c in calls] == [30, 30, 15]
         assert len({i for c in calls for i in c["ids"]}) == 75
-        assert sum(c["max_seconds"] for c in calls) == 3 * 90 + 75 * 12
+        assert [c["max_seconds"] for c in calls] == [panel_job.chunk_seconds(n) for n in (30, 30, 15)] == [675, 675, 405]
         assert next(s for s in record["steps"] if s["name"] == f"judge-{name}")["gpuSeconds"] == 15
 
 
@@ -185,6 +189,39 @@ def test_retry_recovers_after_one_failed_chunk(tmp_path):
     assert {s["name"]: s["gpuSeconds"] for s in record["steps"]}["judge-qwen"] == 8
 
 
+def test_chunks_that_make_progress_do_not_use_up_the_retry(tmp_path):
+    results = iter(["budget_exhausted", "failed", "budget_exhausted"])
+
+    def partial(judge, items, path):
+        status = next(results, None) if judge == "qwen" else None
+        if status:
+            write_lines(path, items, 10)
+            return {"status": status, "message": "Deadline.", "graded": 10, "run": {"chargedGpuSeconds": 1}, "budget": {}}
+
+    fake = Judge(gpus=["GPU-a"], hook=partial)
+    store, pid = setup(tmp_path)
+    record = fake.run(store, tmp_path, pid)
+    assert record["status"] == "complete", record
+    assert [len(c["ids"]) for c in fake.judged("qwen")] == [60, 50, 40, 30]
+    assert len(read_grades(folder(tmp_path, pid) / "grades-qwen.jsonl")) == 60
+
+
+def test_two_no_progress_chunks_in_a_row_fail_the_step(tmp_path):
+    results = iter([10, 0, 0])
+
+    def stalls(judge, items, path):
+        if judge != "qwen":
+            return None
+        write_lines(path, items, next(results))
+        return {"status": "failed", "message": "Worker crashed.", "graded": 0, "run": {"chargedGpuSeconds": 1}, "budget": {}}
+
+    fake = Judge(gpus=["GPU-a"], hook=stalls)
+    store, pid = setup(tmp_path)
+    record = fake.run(store, tmp_path, pid)
+    assert record["status"] == "failed" and record["message"] == "judge-qwen: Worker crashed."
+    assert len(fake.judged("qwen")) == 3 and fake.judged("yi") == []
+
+
 def test_ledger_short_before_chunk_fails_step(tmp_path, monkeypatch):
     store, pid = setup(tmp_path)
     remaining = iter([15000])
@@ -192,7 +229,7 @@ def test_ledger_short_before_chunk_fails_step(tmp_path, monkeypatch):
     fake = Judge(gpus=["GPU-a"])
     record = fake.run(store, tmp_path, pid)
     assert record["status"] == "failed" and fake.calls == []
-    assert "GPU ledger has 10 s left; this chunk needs 810 s" in record["message"]
+    assert "GPU ledger has 10 s left; this chunk needs 1215 s" in record["message"]
     assert record["report"]["incomplete"] is True
 
 
@@ -231,6 +268,7 @@ def test_no_idle_gpu_fails_without_spinning(tmp_path):
     fake = Judge(gpus=[])
     record = fake.run(store, tmp_path, pid)
     assert record["status"] == "failed" and "gpu_busy" in record["message"] and fake.calls == []
+    assert "start a new panel" in record["message"] and "start the panel again" not in record["message"]
 
 
 def test_read_grades_ignores_torn_trailing_line(tmp_path):

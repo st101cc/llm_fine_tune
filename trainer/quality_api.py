@@ -504,13 +504,15 @@ def install_quality_routes(app, get_root):
         items = sample_items(source, prompts)
         judges = judge_status(target.root)
         plan = estimate(len(items), budget_status(target.root)['remainingGpuSeconds'], {name: item['status'] == 'ready' for name, item in judges.items()})
+        if comparison_active(target):
+            plan['reasons'].append('a comparison is running; wait for it to finish')
+        if panel_active(target):
+            plan['reasons'].append('a judge panel is running; wait for it to finish')
+        plan['feasible'] = not plan['reasons']
         candidates = sorted({item['candidate'] for item in items})
-        unknown = False
-        if source['kind'] == 'evaluation':
-            recorded = {(a['caseId'], a['candidate']) for a in target.get('evaluation', source['id']).get('generation', {}).get('answers', []) if 'truncated' in a}
-            unknown = any((a['caseId'], a['candidate']) not in recorded for a in source['answers'])
         return source, {'feasible': plan['feasible'], 'reasons': plan['reasons'], 'items': len(items), 'candidates': candidates, 'prompts': prompts, 'maxPrompts': maximum,
-                        'judges': judges, 'estimate': plan, 'selfGrading': self_grading_warnings(candidates), 'referenceMode': source['referenceMode'], 'truncatedUnknown': unknown}
+                        'judges': judges, 'estimate': plan, 'selfGrading': self_grading_warnings(candidates), 'referenceMode': source['referenceMode'],
+                        'truncatedUnknown': source['truncatedUnknown']}
 
     @app.post('/quality/panels/estimate')
     @guarded

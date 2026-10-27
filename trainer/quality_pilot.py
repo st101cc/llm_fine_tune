@@ -201,7 +201,7 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
     return response(generated["status"], generated["message"], **{key: value for key, value in generated.items() if key not in ("status", "message")}, run=run)
 
 
-def judge_bounded(items, *, runtime_root, judge, grades_path, reference_mode, cancelled=lambda: False, max_seconds=1800, gpu=None):
+def judge_bounded(items, *, runtime_root, judge, grades_path, reference_mode, cancelled=lambda: False, max_seconds=1800, gpu=None, revision=None):
     """One judge, one owned subprocess, shared GPU-second ledger; appends to grades_path so chunks resume."""
     from quality_models import judge_status
     if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or not 0 < max_seconds <= 1800:
@@ -215,6 +215,9 @@ def judge_bounded(items, *, runtime_root, judge, grades_path, reference_mode, ca
     status = judge_status(runtime_root)[judge]
     if status["status"] != "ready":
         return {"status": "unavailable", "reason": "missing_weights", "graded": count(), "run": None, "budget": budget_status(runtime_root)}
+    if revision is not None and revision != status["revision"]:
+        return {"status": "unavailable", "reason": "revision_changed", "message": f"{judge} revision changed since this panel was prepared; start a new panel.",
+                "graded": count(), "run": None, "budget": budget_status(runtime_root)}
     directory = root / "judging" / str(uuid.uuid4())
     directory.mkdir(parents=True)
     request = {"judge": judge, "modelId": status["modelId"], "revision": status["revision"], "items": list(items), "referenceMode": reference_mode, "gradesPath": str(grades_path)}

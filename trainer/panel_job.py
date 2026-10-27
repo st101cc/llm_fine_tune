@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from judge_panel import (AGGREGATION_RULE, CORRECTNESS_RUBRIC, JUDGES, LANGUAGE_RUBRIC, LOAD_SECONDS, MAX_RUN_SECONDS, PANEL_VERSION, SECONDS_PER_GRADE, SYSTEM,
-                         TRUNCATION_RULE, build_report, chunk_size, estimate, evaluator_id, load_source, sample_items, self_grading_warnings)
+from judge_panel import (AGGREGATION_RULE, CORRECTNESS_RUBRIC, JUDGES, LANGUAGE_RUBRIC, PANEL_VERSION, SYSTEM, TRUNCATION_RULE, build_report, chunk_seconds,
+                         chunk_size, estimate, evaluator_id, load_source, sample_items, self_grading_warnings)
 from quality_models import judge_status
 from quality_pilot import budget_status, idle_gpus, judge_bounded
 from quality_store import digest, identifier
@@ -16,7 +16,7 @@ from quality_store import digest, identifier
 NAMES = tuple(j["name"] for j in JUDGES)
 STEPS = ("prepare", "judge-breeze", "judge-qwen", "judge-yi", "report")
 PHASES = (("prepare",), ("judge-breeze", "judge-qwen"), ("judge-yi",), ("report",))
-GPU_BUSY = "gpu_busy: no idle GPU is available for this step; wait for an idle GPU and start the panel again."
+GPU_BUSY = "gpu_busy: no idle GPU is available for this step; wait for an idle GPU and start a new panel."
 
 
 def now():
@@ -86,7 +86,8 @@ def run_panel(store, root, panel_id, stop, *, gpus=idle_gpus, judge=judge_bounde
         record.update(estimate=plan, sourceFingerprint=digest(items), judgeRevisions=revisions, referenceMode=source["referenceMode"],
                       protocol={"panelVersion": PANEL_VERSION, "aggregationRule": AGGREGATION_RULE, "system": SYSTEM, "correctnessRubric": CORRECTNESS_RUBRIC(source["referenceMode"]),
                                 "languageRubric": LANGUAGE_RUBRIC, "truncationRule": TRUNCATION_RULE},
-                      evaluatorId=evaluator_id(revisions, source["referenceMode"]), selfGrading=self_grading_warnings(sorted({i["candidate"] for i in items})))
+                      evaluatorId=evaluator_id(revisions, source["referenceMode"]), selfGrading=self_grading_warnings(sorted({i["candidate"] for i in items})),
+                      truncatedItems=sum(bool(i["truncated"]) for i in items), truncatedUnknown=source["truncatedUnknown"])
         for name in NAMES:
             steps[f"judge-{name}"]["total"] = len(items)
 
@@ -107,15 +108,15 @@ def run_panel(store, root, panel_id, stop, *, gpus=idle_gpus, judge=judge_bounde
             if judge_status(root)[name]["revision"] != record["judgeRevisions"][name]:
                 raise RuntimeError(f"{name} revision changed since this panel was prepared; start a new panel.")
             chunk = todo[:chunk_size()]
-            need = min(MAX_RUN_SECONDS, LOAD_SECONDS + len(chunk) * SECONDS_PER_GRADE)
+            need = chunk_seconds(len(chunk))
             left = budget_status(root)["remainingGpuSeconds"]
             if left < need:
                 raise RuntimeError(f"GPU ledger has {math.floor(left)} s left; this chunk needs {need} s")
             result = judge(chunk, runtime_root=root, judge=name, grades_path=path, reference_mode=record["referenceMode"],
-                           cancelled=stop.is_set, max_seconds=need, gpu=gpu)
+                           cancelled=stop.is_set, max_seconds=need, gpu=gpu, revision=record["judgeRevisions"][name])
             step["gpuSeconds"] += (result.get("run") or {}).get("chargedGpuSeconds") or 0
-            done = read_grades(path)
-            if result["status"] == "complete" and all(i["itemId"] in done for i in chunk):
+            # Only a chunk that graded nothing counts toward the one-retry limit; any progress resets it.
+            if len(read_grades(path)) > len(done):
                 failures = 0
                 continue
             failures += 1

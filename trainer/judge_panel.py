@@ -4,6 +4,7 @@ import math
 import random
 import re
 
+from comparison import RESERVATION_FACTOR
 from evaluator import RUBRICS
 from quality_store import digest, identifier
 
@@ -55,7 +56,9 @@ def _evaluation_source(store, evaluation_id):
     truncated = {(a["caseId"], a["candidate"]): bool(a.get("truncated")) for a in record.get("generation", {}).get("answers", [])}
     answers = [{"caseId": r["caseId"], "candidate": name, "output": r["output"], "truncated": truncated.get((r["caseId"], name), False), "human": r.get("correct")}
                for name, candidate in record["result"]["candidates"].items() for r in candidate["results"] if r.get("task") == "writing"]
-    return "evaluation", "case", cases, answers
+    # Locally generated answers are known (absent `truncated` means full length); uploaded ones are not.
+    unknown = any((a["caseId"], a["candidate"]) not in truncated for a in answers)
+    return "evaluation", "case", cases, answers, unknown
 
 
 def _comparison_source(store, comparison_id):
@@ -71,15 +74,15 @@ def _comparison_source(store, comparison_id):
     cases = [{"id": r["id"], "input": r["input"], "reference": None} for r in rows if r.get("task") == "writing"]
     answers = [{"caseId": a["caseId"], "candidate": p.stem, "output": a["output"], "truncated": bool(a.get("truncated")), "human": None}
                for p in paths for a in json.loads(p.read_text(encoding="utf-8"))["answers"]]
-    return "comparison", "none", cases, answers
+    return "comparison", "none", cases, answers, False
 
 
 def load_source(store, source):
     if source.get("evaluationId"):
-        kind, mode, cases, answers = _evaluation_source(store, source["evaluationId"])
+        kind, mode, cases, answers, unknown = _evaluation_source(store, source["evaluationId"])
         ident = source["evaluationId"]
     elif source.get("comparisonId"):
-        kind, mode, cases, answers = _comparison_source(store, source["comparisonId"])
+        kind, mode, cases, answers, unknown = _comparison_source(store, source["comparisonId"])
         ident = source["comparisonId"]
     else:
         raise ValueError("choose an evaluationId or a comparisonId")
@@ -87,7 +90,7 @@ def load_source(store, source):
     answers = [a for a in answers if a["caseId"] in wanted]
     if not answers:
         raise ValueError(NO_ANSWERS)
-    return {"kind": kind, "id": ident, "referenceMode": mode, "cases": cases, "answers": answers}
+    return {"kind": kind, "id": ident, "referenceMode": mode, "cases": cases, "answers": answers, "truncatedUnknown": unknown}
 
 
 def sample_items(source, prompts):
@@ -176,17 +179,23 @@ def aggregate(votes):
 
 
 def chunk_size():
-    return (MAX_RUN_SECONDS - LOAD_SECONDS) // SECONDS_PER_GRADE
+    return math.floor((MAX_RUN_SECONDS / RESERVATION_FACTOR - LOAD_SECONDS) / SECONDS_PER_GRADE)
+
+
+def chunk_seconds(n):
+    """Reserved seconds for one chunk of n grades: the worker deadline and the ledger admission figure."""
+    return min(MAX_RUN_SECONDS, math.ceil((LOAD_SECONDS + n * SECONDS_PER_GRADE) * RESERVATION_FACTOR))
 
 
 def estimate(items, remaining_gpu_seconds, judges_ready):
-    chunks = math.ceil(items / chunk_size())
-    gpu = len(JUDGES) * (items * SECONDS_PER_GRADE + chunks * LOAD_SECONDS)
+    size = chunk_size()
+    chunks = math.ceil(items / size)
+    gpu = len(JUDGES) * sum(chunk_seconds(min(size, items - start)) for start in range(0, items, size))
     reasons = [f"{j['name']}: missing_weights" for j in JUDGES if not judges_ready.get(j["name"])]
     if items < 1:
         reasons.append("nothing to grade")
     if gpu > remaining_gpu_seconds:
-        reasons.append(f"GPU ledger has {math.ceil(remaining_gpu_seconds)} s left; this panel needs {gpu} s")
+        reasons.append(f"GPU ledger has {math.floor(remaining_gpu_seconds)} s left; this panel needs {gpu} s")
     return {"feasible": not reasons, "reasons": reasons, "gradesPerJudge": items, "chunksPerJudge": chunks,
             "gpuSeconds": gpu, "ledgerRemaining": remaining_gpu_seconds}
 

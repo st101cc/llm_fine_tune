@@ -121,6 +121,14 @@ def test_judge_bounded_refuses_unprepared_judge(tmp_path, monkeypatch):
     assert result["status"] == "unavailable" and result["reason"] == "missing_weights"
 
 
+def test_judge_bounded_refuses_changed_revision_without_launching(tmp_path, monkeypatch):
+    fake_status(monkeypatch)
+    monkeypatch.setattr(qp, "run_with_pilot_budget", no_run)
+    result = bounded(tmp_path, revision="r0")
+    assert result["status"] == "unavailable" and result["reason"] == "revision_changed" and result["run"] is None
+    assert not (tmp_path / "quality" / "judging").exists()
+
+
 @pytest.mark.parametrize("seconds", [0, 1801, True])
 def test_judge_bounded_rejects_bad_budget(tmp_path, monkeypatch, seconds):
     fake_status(monkeypatch)
@@ -148,7 +156,7 @@ def test_judge_bounded_runs_worker_and_counts_grades(tmp_path, monkeypatch):
         grades.write_text('{"itemId": "a", "vote": {}}\n{"itemId": "b", "vote": {}}\n', encoding="utf-8")
         return {"status": "complete", "phases": [], "chargedGpuSeconds": 5, "budget": {"remainingGpuSeconds": 9}}
     monkeypatch.setattr(qp, "run_with_pilot_budget", run)
-    result = bounded(tmp_path, make_items(2), grades_path=grades)
+    result = bounded(tmp_path, make_items(2), grades_path=grades, revision="r1")
     assert result["status"] == "complete" and result["graded"] == 2 and result["budget"] == {"remainingGpuSeconds": 9}
     command = seen["command"]
     assert command[command.index("--worker") + 1] == "judge"
