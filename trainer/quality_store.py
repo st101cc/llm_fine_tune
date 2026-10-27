@@ -140,7 +140,7 @@ class QualityStore:
                         self.put('version', record, db)
                     except OSError:
                         pass  # Preserve durable intent for the next storage recovery.
-                if row['kind'] != 'comparison' and record.get('status') in ('queued', 'running', 'cancelling'):
+                if row['kind'] not in ('comparison', 'panel') and record.get('status') in ('queued', 'running', 'cancelling'):
                     record.update(status='interrupted', message='Interrupted by service restart; start a new job. Completed artifacts were preserved.')
                     self.put(row['kind'], record, db)
 

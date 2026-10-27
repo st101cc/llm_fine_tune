@@ -115,3 +115,10 @@ def test_recover_leaves_comparisons_resumable(tmp_path):
     store.recover()
     assert store.get('comparison', comparison['id'])['status'] == 'running'
     assert store.get('audit', audit['id'])['status'] == 'interrupted'
+
+
+def test_store_recover_leaves_panel_running(tmp_path):
+    store, path, ref = setup(tmp_path, [{'text': '软件'}] * 5)
+    panel = store.put('panel', {'id': '00000000-0000-4000-8000-000000000002', 'status': 'running'})
+    store.recover()
+    assert store.get('panel', panel['id'])['status'] == 'running'
