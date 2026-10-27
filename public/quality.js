@@ -13,7 +13,7 @@ function qualityError(error) {
 }
 function qualityHeader(title, description) {
   clearTimeout(qualityTimer);
-  app.innerHTML = shell('Traditional Chinese pilot', title, description, '<a class="button" href="#/workspace">Workspace</a>') + '<section class="card body-pad quality-panel"><p class="notice">Local processing only · No cloud clarification or hosted judging · Taiwan residency has not been verified.</p><nav class="quality-actions"><a class="button" href="#/quality">Dataset quality</a><a class="button" href="#/quality-evaluations">Evaluations</a><a class="button" href="#/quality-comparisons">Comparisons</a></nav><p id="quality-error" role="alert"></p><div id="quality-content">Loading…</div></section></div>';
+  app.innerHTML = shell('Traditional Chinese pilot', title, description, '<a class="button" href="#/workspace">Workspace</a>') + '<section class="card body-pad quality-panel"><p class="notice">Local processing only · No cloud clarification or hosted judging · Taiwan residency has not been verified.</p><nav class="quality-actions"><a class="button" href="#/quality">Dataset quality</a><a class="button" href="#/quality-evaluations">Evaluations</a><a class="button" href="#/quality-comparisons">Comparisons</a><a class="button" href="#/quality-panels">Judge panels</a></nav><p id="quality-error" role="alert"></p><div id="quality-content">Loading…</div></section></div>';
 }
 async function qualityPage(id) {
   qualityHeader(id ? 'Review changes' : 'Dataset quality', 'Import → audit → review corrections → create a version. Your original data stays unchanged.');
@@ -123,7 +123,7 @@ async function qualityEvaluationResult(id) {
   if(route() !== 'quality-evaluations/'+id) return;
   const result=record.result;
   const benchmarkNote=record.benchmark ? `<p class="notice">TMMLU+ smoke subset · ${qualityEscape(record.benchmark.version)} · immutable revision ${qualityEscape(record.benchmark.revision)}. MCQ accuracy is a per-question aggregate; subjects remain separate. This is not a full benchmark or an official leaderboard score.</p>` : '';
-  document.querySelector('#quality-content').innerHTML=`<p role="status">${qualityEscape(record.status)} · ${qualityEscape(record.message)}</p>${['queued','running','cancelling'].includes(record.status)?'<button class="button" id="quality-eval-cancel">Cancel evaluation</button>':''}${result?Object.entries(result.candidates).map(([candidate,data])=>`<article class="quality-finding"><h2>${qualityEscape(candidate)}</h2><p>Coverage: ${data.coverage.answered}/${data.coverage.expected} · Missing: ${qualityEscape(data.coverage.missingCaseIds.join(', ') || 'none')}</p><h3>Separate task measures</h3><pre>${qualityEscape(JSON.stringify(data.metrics,null,2))}</pre><h3>Per-subject measures</h3><pre>${qualityEscape(JSON.stringify(data.subjects,null,2))}</pre><details><summary>Answers, language findings and review judgments</summary><pre>${qualityEscape(JSON.stringify(data.results,null,2))}</pre></details></article>`).join('')+`<h2>Paired differences</h2><pre>${qualityEscape(JSON.stringify(result.comparisons,null,2))}</pre><h3>Comparisons not supported</h3><pre>${qualityEscape(JSON.stringify(result.unpaired,null,2))}</pre>`:''}<a class="button" href="/api/quality/evaluations/${id}/export">Export evaluation report</a>`;
+  document.querySelector('#quality-content').innerHTML=`<p role="status">${qualityEscape(record.status)} · ${qualityEscape(record.message)}</p>${['queued','running','cancelling'].includes(record.status)?'<button class="button" id="quality-eval-cancel">Cancel evaluation</button>':''}${result?Object.entries(result.candidates).map(([candidate,data])=>`<article class="quality-finding"><h2>${qualityEscape(candidate)}</h2><p>Coverage: ${data.coverage.answered}/${data.coverage.expected} · Missing: ${qualityEscape(data.coverage.missingCaseIds.join(', ') || 'none')}</p><h3>Separate task measures</h3><pre>${qualityEscape(JSON.stringify(data.metrics,null,2))}</pre><h3>Per-subject measures</h3><pre>${qualityEscape(JSON.stringify(data.subjects,null,2))}</pre><details><summary>Answers, language findings and review judgments</summary><pre>${qualityEscape(JSON.stringify(data.results,null,2))}</pre></details></article>`).join('')+`<h2>Paired differences</h2><pre>${qualityEscape(JSON.stringify(result.comparisons,null,2))}</pre><h3>Comparisons not supported</h3><pre>${qualityEscape(JSON.stringify(result.unpaired,null,2))}</pre>`:''}<a class="button" href="/api/quality/evaluations/${id}/export">Export evaluation report</a>${record.status==='complete'&&result?`<a class="button" href="#/quality-panels/new/evaluation/${encodeURIComponent(id)}">Grade with judge panel</a>`:''}`;
   document.querySelector('#quality-content').insertAdjacentHTML('afterbegin',benchmarkNote);
   document.querySelector('#quality-eval-cancel')?.addEventListener('click',async()=>{try{await qualityRequest(`/evaluations/${id}/cancel`,{});await qualityEvaluationResult(id);}catch(e){qualityError(e);}});
   if(['queued','running','cancelling'].includes(record.status)) qualityTimer=setTimeout(()=>qualityEvaluationResult(id).catch(qualityError),1500);
@@ -218,7 +218,7 @@ function qualityComparisonResult(record) {
   const gpu = (record.steps || []).reduce((sum, s)=>sum + (Number(s.gpuSeconds) || 0), 0);
   const runs = report.runs || {};
   const measured = `<aside class="quality-measured"><h2>How this was measured</h2><ul><li>Edited share: ${split.counts?.trainEdited ?? '—'} of ${trainSize ?? '—'} training rows per run were edited by the review (requested ${Math.round((settings.editedShare ?? 0.5) * 100)}%). Train size ${trainSize ?? '—'} rows, ${settings.epochs ?? 2} epochs; both runs use the same rows and differ only in the review’s edits.</li><li>Eval prompts were chosen from rows the review changed, not at random.</li><li>Sample size: ${evalSize ?? '—'} writing prompts and ${models.base?.tmmluplusAnswered ?? '—'} TMMLU+ questions per model; split seed ${split.settings?.seed ?? 42}. Writing answers are 128-token samples.</li><li>Truncated samples: ${present.map(([key,label])=>`${label} ${models[key].truncated ?? 0} of ${models[key].writingAnswered ?? 0}`).join(' · ')}.</li><li>Model: TAIDE, 4-bit QLoRA, revision ${qualityEscape(record.modelRevision || 'not recorded')}; TMMLU+ revision ${qualityEscape(record.benchmarkRevision || 'not recorded')}.</li><li>GPU-seconds used: ${Math.round(gpu)} s across all steps.</li></ul></aside>`;
-  return `<p class="quality-headline">${qualityEscape(report.headline)}</p><h2>Results by model</h2>${table}<h2>Listed terms per 1,000 characters</h2><p>Lower is better: fewer terms from the customer list appear in the answers.</p>${bars}<h2>Paired prompts</h2><p>The same prompt answered by both adapters.</p>${paired}${examples ? `<h2>Examples where the adapters differ</h2>${examples}` : ''}${measured}<div class="quality-actions"><a class="button primary" href="/api/quality/comparisons/${encodeURIComponent(record.id)}/export">Export comparison (JSON)</a>${['original','reviewed'].filter(v=>runs[v]).map(v=>`<a class="button" href="#/runs/${encodeURIComponent(runs[v])}">${v === 'original' ? 'Original' : 'Reviewed'}-trained run</a>`).join('')}</div><details><summary>Steps</summary>${qualityStepTracker(record)}</details>`;
+  return `<p class="quality-headline">${qualityEscape(report.headline)}</p><h2>Results by model</h2>${table}<h2>Listed terms per 1,000 characters</h2><p>Lower is better: fewer terms from the customer list appear in the answers.</p>${bars}<h2>Paired prompts</h2><p>The same prompt answered by both adapters.</p>${paired}${examples ? `<h2>Examples where the adapters differ</h2>${examples}` : ''}${measured}<div class="quality-actions"><a class="button primary" href="/api/quality/comparisons/${encodeURIComponent(record.id)}/export">Export comparison (JSON)</a><a class="button" href="#/quality-panels/new/comparison/${encodeURIComponent(record.id)}">Grade with judge panel</a>${['original','reviewed'].filter(v=>runs[v]).map(v=>`<a class="button" href="#/runs/${encodeURIComponent(runs[v])}">${v === 'original' ? 'Original' : 'Reviewed'}-trained run</a>`).join('')}</div><details><summary>Steps</summary>${qualityStepTracker(record)}</details>`;
 }
 async function qualityComparisonView(id) {
   const record = await qualityRequest('/comparisons/' + encodeURIComponent(id));
@@ -232,4 +232,98 @@ async function qualityComparisonView(id) {
     try { await qualityRequest(`/comparisons/${encodeURIComponent(id)}/cancel`, {}); await qualityComparisonView(id); } catch(e) { qualityError(e); event.target.disabled = false; }
   });
   if (active) qualityTimer = setTimeout(()=>qualityComparisonView(id).catch(qualityError), 3000);
+}
+const qualityJudges = [['breeze','Breeze'],['qwen','Qwen'],['yi','Yi']];
+const qualityPanelSteps = {prepare:'Prepare items','judge-breeze':'Breeze judge','judge-qwen':'Qwen judge','judge-yi':'Yi judge',report:'Build report'};
+const qualityRate = rate => rate == null ? '—' : `${Math.round(rate * 100)}%`;
+const qualityGraded = t => t.pass == null ? '—' : `${t.pass + t.fail} of ${t.pass + t.fail + t.needsReview} graded`;
+const qualityPanelStartHash = source => source.evaluationId ? '#/quality-panels/new/evaluation/' + encodeURIComponent(source.evaluationId) : '#/quality-panels/new/comparison/' + encodeURIComponent(source.comparisonId);
+const qualitySelfGrading = map => Object.entries(map || {}).map(([candidate, judge])=>`<li>${qualityEscape(candidate)} looks like the ${qualityEscape(judge)} judge’s own model family; the ${qualityEscape(judge)} vote on it may be biased.</li>`).join('');
+async function qualityPanels(id, parts) {
+  qualityHeader('Judge panels','Three local judge models grade saved writing answers for correctness and Traditional Chinese quality. Results are estimates, not verified.');
+  try {
+    if (id === 'new') return await qualityPanelStart(parts[2], parts[3]);
+    if (id) return await qualityPanelView(id);
+    const items = await qualityRequest('/panels');
+    if (route() !== 'quality-panels') return;
+    document.querySelector('#quality-content').innerHTML = `<h2>Saved judge panels</h2>${items.map(p=>`<article class="quality-finding"><p><a href="#/quality-panels/${encodeURIComponent(p.id)}"><strong>${qualityEscape(p.displayName || p.id.slice(0,8))}</strong></a> · <span class="pill ${p.status === 'complete' ? 'complete' : ''}">${qualityEscape(p.status)}</span> · ${qualityEscape(new Date(p.createdAt).toLocaleString())}</p></article>`).join('') || '<p>No judge panels yet.</p>'}<p>Start a panel with “Grade with judge panel” on a saved <a href="#/quality-evaluations">evaluation</a> or a complete <a href="#/quality-comparisons">comparison</a>.</p>`;
+  } catch(e) {qualityError(e);}
+}
+async function qualityPanelStart(kind, sourceId) {
+  if (!['evaluation','comparison'].includes(kind) || !sourceId) throw new Error('Choose a saved evaluation or comparison to grade.');
+  const here = `quality-panels/new/${kind}/${sourceId}`, source = {[kind + 'Id']: sourceId};
+  const name = kind === 'comparison' ? await qualityRequest('/comparisons/' + encodeURIComponent(sourceId)).then(r=>r.displayName, ()=>null) : null;
+  if (route() !== here) return;
+  document.querySelector('#quality-content').innerHTML = `<h2>Grade with judge panel</h2><p>${qualityEscape(name || `${kind === 'comparison' ? 'Comparison' : 'Evaluation'} ${sourceId.slice(0,8)}`)} · writing answers only</p><form id="quality-panel-form" novalidate><div class="form-row"><label class="field">Prompts to grade<input id="qp-prompts" type="number" min="1" step="1" placeholder="20"></label></div><div id="quality-estimate" class="quality-estimate" role="status" aria-live="polite">Estimating…</div><button class="button primary" id="qp-start" type="submit" disabled>Start judge panel</button></form>`;
+  const form = document.querySelector('#quality-panel-form'), start = document.querySelector('#qp-start'), panel = document.querySelector('#quality-estimate'), input = document.querySelector('#qp-prompts');
+  let body = null, ticket = 0;
+  const show = (reasons, facts='') => {
+    panel.innerHTML = facts + (reasons.length ? `<p><strong>This panel can’t start yet:</strong></p><ul class="quality-reasons">${reasons.map(r=>`<li>${qualityEscape(r)}</li>`).join('')}</ul>` : '<p><strong>Ready to start.</strong> All three judges are prepared and the panel fits the GPU ledger.</p>');
+  };
+  const estimate = async () => {
+    const mine = ++ticket;
+    start.disabled = true; body = null;
+    if (!input.checkValidity()) return show([`Prompts to grade: ${input.validationMessage}`]);
+    const request = {source};
+    if (input.value) request.prompts = Number(input.value);
+    panel.textContent = 'Estimating…';
+    try {
+      const result = await qualityRequest('/panels/estimate', request);
+      if (mine !== ticket || route() !== here) return;
+      const e = result.estimate || {};
+      input.max = result.maxPrompts;
+      if (!input.value) input.value = result.prompts;
+      const fact = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
+      const judges = `<ul>${qualityJudges.map(([key,label])=>{const j = result.judges?.[key]; return `<li>${label} · ${qualityEscape(j?.modelId || '—')} · ${j?.status === 'ready' ? 'ready' : '<span class="quality-reasons">not prepared: run <code>python trainer/quality_models.py prepare judges</code> on the backend</span>'}</li>`;}).join('')}</ul>`;
+      const notes = [];
+      if (kind === 'comparison') notes.push('Comparison answers were cut at 128 tokens; judges grade only what is visible.');
+      if (result.truncatedUnknown) notes.push('Uploaded answers are treated as complete.');
+      if (result.referenceMode === 'none') notes.push('No reference shown to judges for comparisons.');
+      const self = qualitySelfGrading(result.selfGrading);
+      show(result.reasons || [], `<dl class="quality-facts">${fact('Answers to grade', result.items ?? '—')}${fact('Candidates', (result.candidates || []).length)}${fact('Prompts', `${result.prompts ?? '—'} of ${result.maxPrompts ?? '—'}`)}${fact('Grades per judge', e.gradesPerJudge ?? '—')}${fact('GPU-seconds needed', e.gpuSeconds ?? '—')}${fact('Ledger remaining', e.ledgerRemaining == null ? '—' : `${Math.floor(e.ledgerRemaining)} s`)}</dl><h3>Judges</h3>${judges}${notes.length || self ? `<ul>${notes.map(n=>`<li>${qualityEscape(n)}</li>`).join('')}${self}</ul>` : ''}`);
+      if (result.feasible) { body = request; start.disabled = false; }
+    } catch(error) { if (mine === ticket) show([error.message]); }
+  };
+  form.oninput = () => { body = null; start.disabled = true; ticket++; clearTimeout(qualityTimer); qualityTimer = setTimeout(estimate, 400); };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (!body || !confirm('Start the judge panel? It runs three local judge models on the GPU, charged to the shared ledger.')) return;
+    start.disabled = true;
+    try { const record = await qualityRequest('/panels', body); location.hash = '#/quality-panels/' + record.id; }
+    catch(e) { qualityError(e); start.disabled = false; }
+  };
+  await estimate();
+}
+function qualityPanelTracker(record) {
+  return `<ol class="quality-steps">${(record.steps || []).map(step=>{
+    const meta = [step.name.startsWith('judge-') && step.total != null ? `${step.graded ?? 0} of ${step.total} graded` : null, step.gpuSeconds ? `${Math.round(step.gpuSeconds)} GPU-s` : null].filter(Boolean);
+    return `<li class="${qualityEscape(step.status)}"><strong>${qualityEscape(qualityPanelSteps[step.name] || step.name)}</strong><span class="pill ${step.status === 'complete' ? 'complete' : ''}">${qualityEscape(step.status)}</span>${meta.length ? `<span class="quality-step-meta">${meta.join(' · ')}</span>` : ''}${step.message ? `<span class="quality-step-meta quality-reasons">${qualityEscape(step.message)}</span>` : ''}</li>`;
+  }).join('')}</ol>`;
+}
+function qualityPanelVote(vote) {
+  if (!vote || vote.error) return `<p class="quality-step-meta">No grade (${qualityEscape(vote?.error || 'missing')}).</p>`;
+  return ['correctness','language'].map(key=>`<p><strong>${key === 'correctness' ? 'Correctness' : 'Language'}: ${qualityEscape(vote[key]?.verdict)}</strong><br>${qualityEscape(vote[key]?.reason)}</p>`).join('');
+}
+function qualityPanelResult(record) {
+  const report = record.report, names = Object.keys(report.candidates || {});
+  const table = `<div class="quality-table-wrap"><table class="quality-table"><thead><tr><th scope="col">Candidate</th><th scope="col">Correctness</th><th scope="col">Correctness coverage</th><th scope="col">Language</th><th scope="col">Language coverage</th></tr></thead><tbody>${names.map(n=>{const c = report.candidates[n]; return `<tr><th scope="row">${qualityEscape(n)}</th><td>${qualityRate(c.correctness.rate)}</td><td>${qualityGraded(c.correctness)}</td><td>${qualityRate(c.language.rate)}</td><td>${qualityGraded(c.language)}</td></tr>`;}).join('')}</tbody></table></div>`;
+  const bars = (key, title) => `<h3>${title}</h3><div class="quality-bars">${names.map(n=>{const t = report.candidates[n][key], v = t.rate; return `<div class="quality-bar" title="${qualityEscape(n)}: ${qualityRate(v)} ${title.toLowerCase()} (${qualityGraded(t)})"><span>${qualityEscape(n)}</span><span class="quality-bar-track" aria-hidden="true"><i style="width:${v == null ? 0 : (v * 100).toFixed(1)}%"></i></span><strong>${qualityRate(v)}</strong></div>`;}).join('')}</div>`;
+  const flagged = (report.flagged || []).map(f=>`<article class="quality-example"><p><strong>${qualityEscape(f.candidate)}</strong> · case ${qualityEscape(f.caseId)} · correctness ${qualityEscape(f.correctness)} · language ${qualityEscape(f.language)}</p><p class="quality-example-prompt"><strong>Prompt</strong> ${qualityEscape(f.question)}</p><pre>${qualityEscape(f.answer)}</pre>${f.truncated ? '<p class="quality-step-meta">Answer was cut off at a fixed length.</p>' : ''}<div class="quality-answers">${qualityJudges.map(([key,label])=>`<div><h3>${label}</h3>${qualityPanelVote(f.votes?.[key])}</div>`).join('')}</div></article>`).join('');
+  const agreement = report.humanAgreement && report.humanAgreement.compared > 0 ? `<p>Human agreement: the panel matched ${report.humanAgreement.agreed} of ${report.humanAgreement.compared} human judgments (pass or fail only).</p>` : '';
+  const self = qualitySelfGrading(report.selfGrading || record.selfGrading);
+  const protocol = record.protocol || {};
+  return `<p class="quality-headline">Estimated by local models, not verified</p>${report.incomplete ? '<p class="notice" role="alert">Incomplete: fewer than three judges finished. Correctness is not reported; language is reported only if Breeze finished.</p>' : ''}${self ? `<ul>${self}</ul>` : ''}<h2>Results by candidate</h2>${table}${bars('correctness','Correctness rate')}${bars('language','Language rate')}${agreement}${flagged ? `<h2>Flagged disagreements</h2><p>Items where the judges split on correctness or Breeze’s language verdict was not shared.</p>${flagged}` : ''}<aside class="quality-measured"><h2>How this was graded</h2><ul><li>${record.prompts ?? '—'} prompts, ${(report.items || []).length} answers, graded by Breeze, Qwen and Yi with model names hidden.</li><li>Reference: ${record.referenceMode === 'case' ? 'case reference shown to judges' : 'none shown to judges'}.</li><li>${qualityEscape(protocol.aggregationRule || 'Aggregation rule not recorded')}</li><li>Evaluator ${qualityEscape(record.evaluatorId || 'not recorded')}, ${qualityEscape(protocol.panelVersion || 'version not recorded')}.</li></ul></aside><div class="quality-actions"><a class="button primary" href="/api/quality/panels/${encodeURIComponent(record.id)}/export">Export panel (JSON)</a></div>`;
+}
+async function qualityPanelView(id) {
+  const record = await qualityRequest('/panels/' + encodeURIComponent(id));
+  if (route() !== 'quality-panels/' + id) return;
+  const active = qualityActive(record.status);
+  const retry = ['failed','cancelled'].includes(record.status) && record.source;
+  document.querySelector('#quality-content').innerHTML = `<h2>${qualityEscape(record.displayName || 'Judge panel')}</h2><p role="status"><span class="pill ${record.status === 'complete' ? 'complete' : ''}">${qualityEscape(record.status)}</span> ${qualityEscape(record.message || '')}</p>${record.report ? qualityPanelResult(record) + `<details><summary>Steps</summary>${qualityPanelTracker(record)}</details>` : qualityPanelTracker(record)}${active && record.status !== 'cancelling' ? '<button class="button danger" id="quality-panel-cancel">Cancel panel</button>' : ''}${record.status === 'cancelling' ? '<p>Cancelling — the running step stops at its next checkpoint.</p>' : ''}${retry ? `<p>This panel can’t be resumed.</p><a class="button primary" href="${qualityPanelStartHash(record.source)}">Start a new panel</a>` : ''}`;
+  document.querySelector('#quality-panel-cancel')?.addEventListener('click', async event => {
+    if (!confirm('Cancel this judge panel? Finished grades are kept; the running step stops.')) return;
+    event.target.disabled = true;
+    try { await qualityRequest(`/panels/${encodeURIComponent(id)}/cancel`, {}); await qualityPanelView(id); } catch(e) { qualityError(e); event.target.disabled = false; }
+  });
+  if (active) qualityTimer = setTimeout(()=>qualityPanelView(id).catch(qualityError), 3000);
 }

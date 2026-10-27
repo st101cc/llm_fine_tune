@@ -575,6 +575,7 @@ function render() {
   if (page === "quality") qualityPage(id);
   else if (page === "quality-evaluations") qualityEvaluations(id);
   else if (page === "quality-comparisons") qualityComparisons(id, route().split("/")[2]);
+  else if (page === "quality-panels") qualityPanels(id, route().split("/"));
   else if (page === "configure") configure();
   else if (page === "workflow") workflowPage(id);
   else if (page === "train") train(id);
