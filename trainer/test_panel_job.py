@@ -75,6 +75,9 @@ def test_panel_runs_all_judges_and_reports(tmp_path):
     assert record["sourceFingerprint"] == panel_job.digest(items) and record["referenceMode"] == "none"
     assert record["judgeRevisions"] == REVISIONS and record["evaluatorId"] == panel_job.evaluator_id(REVISIONS, "none")
     assert record["selfGrading"] == {} and {c["reference_mode"] for c in fake.calls} == {"none"}
+    protocol = record["protocol"]
+    assert set(protocol) == {"panelVersion", "aggregationRule", "system", "correctnessRubric", "languageRubric", "truncationRule"}
+    assert protocol["panelVersion"] == "judge-panel-v1" and protocol["system"] == panel_job.SYSTEM and "reference" not in protocol["correctnessRubric"].lower()
     report = json.loads((folder(tmp_path, pid) / "report.json").read_text(encoding="utf-8"))
     assert report == record["report"] and set(report["candidates"]) == {"base", "original", "reviewed"}
     assert report["incomplete"] is False and report["candidates"]["base"]["correctness"]["pass"] == 20
@@ -85,6 +88,7 @@ def test_evaluation_source_freezes_human_and_reports_agreement(tmp_path):
     record = Judge().run(store, tmp_path, pid)
     assert record["status"] == "complete" and record["referenceMode"] == "case"
     assert record["selfGrading"] == {"Qwen2.5-7B@base": "qwen"}
+    assert record["protocol"]["correctnessRubric"] == panel_job.CORRECTNESS_RUBRIC("case") and "reference" in record["protocol"]["correctnessRubric"]
     assert record["report"]["humanAgreement"] == {"compared": 2, "agreed": 1}
 
 

@@ -318,7 +318,8 @@ def test_panel_export_shape_and_label(tmp_path, judges):
         folder.mkdir(parents=True)
         (folder / 'items.jsonl').write_text(json.dumps({'itemId': 'row:0|base'}) + '\n', encoding='utf-8')
         (folder / 'grades-breeze.jsonl').write_text(json.dumps({'itemId': 'row:0|base', 'vote': vote}) + '\n{"itemId": "row:', encoding='utf-8')
-        store.put('panel', {**record, 'status': 'complete', 'report': {'incomplete': False}})
+        protocol = {'panelVersion': 'judge-panel-v1', 'languageRubric': 'Pass natural zh-TW.'}
+        store.put('panel', {**record, 'status': 'complete', 'report': {'incomplete': False}, 'protocol': protocol})
         listed = client.get('/quality/panels').json()
         assert listed == [{'id': record['id'], 'displayName': record['displayName'], 'status': 'complete', 'createdAt': record['createdAt'], 'source': record['source']}]
         assert client.get('/quality/panels/' + record['id']).json()['report'] == {'incomplete': False}
@@ -328,6 +329,7 @@ def test_panel_export_shape_and_label(tmp_path, judges):
         assert set(body) == {'panel', 'items', 'grades', 'report', 'label'} and 'report' not in body['panel'] and body['panel']['id'] == record['id']
         assert body['items'] == [{'itemId': 'row:0|base'}] and body['report'] == {'incomplete': False}
         assert body['grades'] == {'breeze': [{'itemId': 'row:0|base', 'vote': vote}], 'qwen': [], 'yi': []}
+        assert body['panel']['protocol'] == protocol and body['panel']['protocol']['panelVersion'] == 'judge-panel-v1' and body['panel']['protocol']['languageRubric']
         assert body['label'] == 'estimated by local models, not verified'
         assert client.get('/quality/panels/' + str(uuid.uuid4()) + '/export').status_code == 404
 

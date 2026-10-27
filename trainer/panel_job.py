@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from judge_panel import (JUDGES, LOAD_SECONDS, MAX_RUN_SECONDS, SECONDS_PER_GRADE, build_report, chunk_size, estimate, evaluator_id,
-                         load_source, sample_items, self_grading_warnings)
+from judge_panel import (AGGREGATION_RULE, CORRECTNESS_RUBRIC, JUDGES, LANGUAGE_RUBRIC, LOAD_SECONDS, MAX_RUN_SECONDS, PANEL_VERSION, SECONDS_PER_GRADE, SYSTEM,
+                         TRUNCATION_RULE, build_report, chunk_size, estimate, evaluator_id, load_source, sample_items, self_grading_warnings)
 from quality_models import judge_status
 from quality_pilot import budget_status, idle_gpus, judge_bounded
 from quality_store import digest, identifier
@@ -84,6 +84,8 @@ def run_panel(store, root, panel_id, stop, *, gpus=idle_gpus, judge=judge_bounde
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "items.jsonl").write_text("".join(json.dumps(i, ensure_ascii=False) + "\n" for i in items), encoding="utf-8")
         record.update(estimate=plan, sourceFingerprint=digest(items), judgeRevisions=revisions, referenceMode=source["referenceMode"],
+                      protocol={"panelVersion": PANEL_VERSION, "aggregationRule": AGGREGATION_RULE, "system": SYSTEM, "correctnessRubric": CORRECTNESS_RUBRIC(source["referenceMode"]),
+                                "languageRubric": LANGUAGE_RUBRIC, "truncationRule": TRUNCATION_RULE},
                       evaluatorId=evaluator_id(revisions, source["referenceMode"]), selfGrading=self_grading_warnings(sorted({i["candidate"] for i in items})))
         for name in NAMES:
             steps[f"judge-{name}"]["total"] = len(items)
