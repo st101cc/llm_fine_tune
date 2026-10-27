@@ -52,3 +52,17 @@ The persistent GPU budget is aggregate across quality inference, pilot phases an
 ## Compare original vs reviewed
 
 After "Create dataset version" on a full audit (Dataset quality page), open "Compare original vs reviewed" next to that version, or use Comparisons. The page shows a live estimate (GPU-seconds, wall clock, ledger remaining) and disables Start when the estimate is infeasible or exceeds the ledger. Defaults: up to 500 training rows with 50% edited by the review, 2 epochs, 60 evaluation prompts. Start launches one resumable job: two QLoRA adapters (original and reviewed answers) train in parallel on the two T4s, then base, original-trained and reviewed-trained models are evaluated, and the result page shows listed-term rates, paired prompt counts, examples, TMMLU+ and an export. Both training runs also appear on Training runs, marked `managedBy` the comparison id. The job charges the same GPU ledger; cancel from the page if needed. Evaluation prompts come from rows the review edited, so the result measures term usage, not general quality.
+
+## Judge panel
+
+The panel grades writing answers from a saved evaluation or a completed comparison with three local judges (Breeze, Qwen and Yi). Prepare the judges once on the backend, from the repo root, with the same data root and Hugging Face cache the backend uses (see `trainer/start-vm-backend.sh`); with the CLI defaults the download can land in a cache the backend never reads:
+
+```bash
+FORGETUNE_DATA_ROOT=$PWD/data HF_HOME=$PWD/data/huggingface .venv/bin/python trainer/quality_models.py prepare judges
+```
+
+This downloads three models of roughly 15–18 GB each, so check free disk space with `df -h` first.
+
+A panel grades 20 prompts by default (each prompt's answers from every candidate). It charges the shared GPU ledger: a 60-item comparison panel reserves about 3,600 GPU-seconds across the three judges, and actual use is usually less. The result page reports estimates by local models, not verified grades. Comparison answers carry no reference, so judges grade them against the question alone.
+
+After an unclean API crash, a judge worker may keep holding its GPU until its deadline, so a relaunched panel can fail with `gpu_busy`; start a new panel once the GPU is idle.

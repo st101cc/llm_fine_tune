@@ -10,7 +10,7 @@ const flagged = {itemId: 'w1|reviewed', caseId: 'w1', candidate: 'reviewed', que
   votes: {breeze: vote('pass', 'fail'), qwen: vote('pass', 'pass'), yi: {error: 'invalid_output'}}};
 const steps = (done, graded) => ['prepare', 'judge-breeze', 'judge-qwen', 'judge-yi', 'report'].map(name => ({name, status: done ? 'complete' : name === 'prepare' ? 'complete' : name === 'judge-breeze' ? 'running' : 'pending', graded: name.startsWith('judge') ? graded : 0, total: name.startsWith('judge') ? 20 : null, message: null, gpuSeconds: 30}));
 const record = {id: 'p1', displayName: 'Comparison c1', status: 'running', source: {comparisonId: 'c1'}, prompts: 20, referenceMode: 'none', steps: steps(false, 12), report: null,
-  protocol: {panelVersion: 'judge-panel-v1', aggregationRule: 'majority of 3'}, evaluatorId: 'abc123'};
+  protocol: {panelVersion: 'judge-panel-v1', aggregationRule: 'majority of 3'}, evaluatorId: 'abc123', truncatedItems: 20, truncatedUnknown: false};
 const report = {candidates: {base: {correctness: tally(18, 0, 2), language: tally(15, 5, 0)}, reviewed: {correctness: tally(10, 6, 4), language: tally(19, 1, 0)}}, flagged: [flagged], items: Array.from({length: 40}, (_, i) => ({itemId: 'i' + i})), incomplete: false, humanAgreement: {compared: 0, agreed: 0}, selfGrading: {}};
 const incomplete = {...report, candidates: {base: {correctness: empty, language: tally(15, 5, 0)}, reviewed: {correctness: empty, language: empty}}, flagged: [], incomplete: true};
 (async () => {
@@ -33,7 +33,7 @@ const incomplete = {...report, candidates: {base: {correctness: empty, language:
       } else if (path === '/panels' && request.method() === 'POST') { status = 202; result = record; }
       else if (path === '/panels/p1') result = current;
       else if (path === '/panels/p2') result = {...record, id: 'p2', status: 'failed', message: 'judge-yi: gpu_busy', steps: steps(false, 3).map(s => s.name === 'judge-yi' ? {...s, status: 'failed', message: 'gpu_busy'} : s), report: incomplete};
-      else if (path === '/panels/p3') result = {...record, id: 'p3', status: 'complete', source: {evaluationId: 'e1'}, referenceMode: 'case', steps: steps(true, 20), report: {...report, humanAgreement: {compared: 8, agreed: 6}}};
+      else if (path === '/panels/p3') result = {...record, id: 'p3', status: 'complete', source: {evaluationId: 'e1'}, referenceMode: 'case', truncatedItems: 0, truncatedUnknown: true, steps: steps(true, 20), report: {...report, humanAgreement: {compared: 8, agreed: 6}}};
       else if (path === '/panels') result = [{id: 'p1', displayName: 'Comparison c1', status: 'complete', createdAt: new Date().toISOString(), source: {comparisonId: 'c1'}}];
       else if (path === '/comparisons/c1') result = {id: 'c1', displayName: 'Style comparison', status: 'complete', report: {headline: 'done', models: {}}, steps: []};
       else if (path === '/evaluations/e1') result = {id: 'e1', status: 'complete', message: '', cases: [], result: {candidates: {}, comparisons: [], unpaired: []}};
@@ -45,8 +45,8 @@ const incomplete = {...report, candidates: {base: {correctness: empty, language:
     await page.getByRole('heading', {name: 'Grade with judge panel', exact: true}).waitFor();
     await page.getByText('Style comparison').waitFor();
     await page.getByText('This panel can’t start yet:').waitFor();
-    assert.equal(await page.getByText('not prepared: run').count(), 3);
-    assert(await page.getByText('python trainer/quality_models.py prepare judges').first().isVisible());
+    assert.equal(await page.getByText('not prepared: on the backend, run').count(), 3);
+    assert(await page.getByText('FORGETUNE_DATA_ROOT=$PWD/data HF_HOME=$PWD/data/huggingface .venv/bin/python trainer/quality_models.py prepare judges', {exact: true}).first().isVisible());
     assert(await page.getByRole('button', {name: 'Start judge panel'}).isDisabled());
     await page.getByText('Comparison answers were cut at 128 tokens; judges grade only what is visible.').waitFor();
     await page.getByText('No reference shown to judges for comparisons.').waitFor();
@@ -76,6 +76,9 @@ const incomplete = {...report, candidates: {base: {correctness: empty, language:
     await page.getByText('No grade (invalid_output)').waitFor();
     assert.equal(await page.getByText('Human agreement').count(), 0);
     assert.equal(await page.getByText('Incomplete: fewer than three judges finished').count(), 0);
+    await page.getByText('20 answers were cut off at a fixed length; judges graded only the visible text.').waitFor();
+    await page.getByText('Reference: none shown to judges.').waitFor();
+    assert.equal(await page.getByText('Uploaded answers are treated as complete.').count(), 0);
     assert.equal(await page.evaluate(() => window.pwned), undefined);
     assert.equal(await page.locator('.quality-example pre img').count(), 0);
     assert((await page.getByRole('link', {name: 'Export panel (JSON)'}).getAttribute('href')).endsWith('/api/quality/panels/p1/export'));
@@ -83,6 +86,9 @@ const incomplete = {...report, candidates: {base: {correctness: empty, language:
 
     await page.goto(base + '/#/quality-panels/p3');
     await page.getByText('Human agreement: the panel matched 6 of 8').waitFor();
+    await page.getByText('Uploaded answers are treated as complete.').waitFor();
+    await page.getByText('Reference: case reference shown to judges.').waitFor();
+    assert.equal(await page.getByText('answers were cut off at a fixed length').count(), 0);
 
     await page.goto(base + '/#/quality-panels/p2');
     await page.getByText('Incomplete: fewer than three judges finished').waitFor();
