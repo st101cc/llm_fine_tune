@@ -250,9 +250,31 @@ def test_report_rates_coverage_and_incomplete():
     assert all("votes" in f for f in report["flagged"])
     assert report["selfGrading"] == {}
 
-    partial = jp.build_report(items, grades, complete_judges={"breeze", "qwen"}, human=None)
-    assert partial["incomplete"] is True
-    assert partial["candidates"]["a"]["correctness"]["rate"] is None and partial["candidates"]["a"]["correctness"]["coverage"] is None
+    assert len(report["items"]) == 8 and {r["itemId"] for r in report["items"]} == {i["itemId"] for i in items}
+    row = next(r for r in report["items"] if r["itemId"] == "c0|b")
+    assert set(row) == {"itemId", "caseId", "candidate", "votes", "correctness", "language"} and row["correctness"] == "fail" and row["language"] == "pass"
+
+    partial = jp.build_report(items, grades, complete_judges={"breeze", "qwen"}, human={("c0", "a"): True})
+    assert partial["incomplete"] is True and partial["flagged"] == [] and partial["humanAgreement"] is None
+    assert partial["candidates"]["a"]["correctness"] == dict.fromkeys(("pass", "fail", "needsReview", "rate", "coverage"))
+    assert partial["candidates"]["a"]["language"] == report["candidates"]["a"]["language"]
+    assert len(partial["items"]) == 8 and all(r["correctness"] is None and r["language"] in ("pass", "fail") for r in partial["items"])
+
+    no_breeze = jp.build_report(items, grades, complete_judges={"qwen", "yi"}, human=None)
+    assert no_breeze["incomplete"] is True
+    assert no_breeze["candidates"]["a"] == {k: dict.fromkeys(("pass", "fail", "needsReview", "rate", "coverage")) for k in ("correctness", "language")}
+    assert len(no_breeze["items"]) == 8 and all(r["correctness"] is None and r["language"] is None for r in no_breeze["items"])
+    assert all(set(r["votes"]) == {"breeze", "qwen", "yi"} for r in no_breeze["items"])
+
+
+def test_aggregate_pads_missing_judges_and_ignores_unknown():
+    result = jp.aggregate({"breeze": vote("pass"), "qwen": vote("pass")})
+    assert result["correctness"] == "needs_review" and result["flagged"]
+    assert result["votes"]["yi"] == {"error": "missing"}
+    result = jp.aggregate({"breeze": vote("pass"), "qwen": vote("pass"), "yi": vote("pass"), "taide": vote("fail")})
+    assert result["correctness"] == "pass" and not result["flagged"] and "taide" not in result["votes"]
+    result = jp.aggregate({"qwen": vote("pass"), "yi": vote("pass")})
+    assert result["language"] == "needs_review" and result["votes"]["breeze"] == {"error": "missing"}
 
 
 def test_report_missing_vote_is_needs_review_and_human_agreement():

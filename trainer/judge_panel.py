@@ -132,13 +132,15 @@ def _label(vote, key):
 
 
 def aggregate(votes):
+    votes = {j["name"]: votes.get(j["name"], {"error": "missing"}) for j in JUDGES}
     labels = [_label(v, "correctness") for v in votes.values()]
     correctness = "pass" if labels.count("pass") >= 2 else "fail" if labels.count("fail") >= 2 else "needs_review"
-    breeze = votes.get("breeze")
-    language = _label(breeze, "language") if breeze else "error"
-    language = language if language in ("pass", "fail") else "needs_review"
+    if any(v.get("error") == "missing" for v in votes.values()):
+        correctness = "needs_review"
+    language = _label(votes["breeze"], "language")
     others = [_label(v, "language") for name, v in votes.items() if name != "breeze"]
-    disputed = bool(breeze) and bool(others) and all(_label(breeze, "language") != other for other in others)
+    disputed = all(language != other for other in others)
+    language = language if language in ("pass", "fail") else "needs_review"
     return {"correctness": correctness, "language": language, "flagged": len(set(labels)) > 1 or disputed, "votes": votes}
 
 
@@ -177,17 +179,19 @@ def _tally(verdicts):
 
 def build_report(items, grades_by_judge, *, complete_judges, human):
     incomplete = not {j["name"] for j in JUDGES} <= set(complete_judges)
-    missing = {"error": "missing"}
-    aggregated = [(item, aggregate({j["name"]: grades_by_judge.get(j["name"], {}).get(item["itemId"], missing) for j in JUDGES})) for item in items]
+    language_ready = "breeze" in complete_judges
+    aggregated = [(item, aggregate({name: grades.get(item["itemId"], {"error": "missing"}) for name, grades in grades_by_judge.items()})) for item in items]
     names = sorted({item["candidate"] for item in items})
     empty = {"pass": None, "fail": None, "needsReview": None, "rate": None, "coverage": None}
-    candidates = {name: {key: empty if incomplete else _tally([a[key] for i, a in aggregated if i["candidate"] == name]) for key in ("correctness", "language")}
-                  for name in names}
+    tally = lambda name, key, ready: _tally([a[key] for i, a in aggregated if i["candidate"] == name]) if ready else empty
+    candidates = {name: {"correctness": tally(name, "correctness", not incomplete), "language": tally(name, "language", language_ready)} for name in names}
     agreement = None
     if human is not None and not incomplete:
         pairs = [(human[(i["caseId"], i["candidate"])], a["correctness"]) for i, a in aggregated
                  if human.get((i["caseId"], i["candidate"])) is not None and a["correctness"] != "needs_review"]
         agreement = {"compared": len(pairs), "agreed": sum(h == (c == "pass") for h, c in pairs)}
     flagged = [] if incomplete else [{**i, **a} for i, a in aggregated if a["flagged"]]
-    return {"candidates": candidates, "flagged": flagged, "incomplete": incomplete, "humanAgreement": agreement,
+    rows = [{"itemId": i["itemId"], "caseId": i["caseId"], "candidate": i["candidate"], "votes": a["votes"],
+             "correctness": None if incomplete else a["correctness"], "language": a["language"] if language_ready else None} for i, a in aggregated]
+    return {"candidates": candidates, "flagged": flagged, "items": rows, "incomplete": incomplete, "humanAgreement": agreement,
             "selfGrading": self_grading_warnings(names)}
