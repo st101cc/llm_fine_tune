@@ -13,7 +13,7 @@ function qualityError(error) {
 }
 function qualityHeader(title, description) {
   clearTimeout(qualityTimer);
-  app.innerHTML = shell('Traditional Chinese pilot', title, description, '<a class="button" href="#/workspace">Workspace</a>') + '<section class="card body-pad quality-panel"><p class="notice">Local processing only · No cloud clarification or hosted judging · Taiwan residency has not been verified.</p><nav class="quality-actions"><a class="button" href="#/quality">Dataset quality</a><a class="button" href="#/quality-evaluations">Evaluations</a></nav><p id="quality-error" role="alert"></p><div id="quality-content">Loading…</div></section></div>';
+  app.innerHTML = shell('Traditional Chinese pilot', title, description, '<a class="button" href="#/workspace">Workspace</a>') + '<section class="card body-pad quality-panel"><p class="notice">Local processing only · No cloud clarification or hosted judging · Taiwan residency has not been verified.</p><nav class="quality-actions"><a class="button" href="#/quality">Dataset quality</a><a class="button" href="#/quality-evaluations">Evaluations</a><a class="button" href="#/quality-comparisons">Comparisons</a></nav><p id="quality-error" role="alert"></p><div id="quality-content">Loading…</div></section></div>';
 }
 async function qualityPage(id) {
   qualityHeader(id ? 'Review changes' : 'Dataset quality', 'Import → audit → review corrections → create a version. Your original data stays unchanged.');
@@ -21,7 +21,7 @@ async function qualityPage(id) {
     if (id) return await qualityReview(id);
     const [audits, versions, sources] = await Promise.all([qualityRequest('/audits'),qualityRequest('/versions'),qualityRequest('/sources')]);
     if (route() !== 'quality') return;
-    document.querySelector('#quality-content').innerHTML = `<form id="quality-audit-form"><h2>Audit a local dataset</h2><p>No training minimum and no GPU required. OpenCC suggests conversions; it does not prove a passage is wrong. Names need reviewer judgment.</p><label class="field" for="quality-source">Previously imported dataset</label><select id="quality-source"><option value="">Upload a file below</option>${sources.map((s,i)=>`<option value="${i}">${qualityEscape(s.label)}</option>`).join('')}</select><label class="field" for="quality-file">Dataset file</label><input id="quality-file" type="file" accept=".jsonl,.csv,.parquet"><label class="field" for="quality-mode">Scan scope</label><select id="quality-mode"><option value="full">Background full scan</option><option value="sample">Quick sample — at most 600 rows, not a full audit</option></select><label><input id="quality-raw" type="checkbox"> Allow corrections to raw text field (never labels)</label><label class="field" for="quality-terms">Customer terminology mappings (JSON object)</label><textarea id="quality-terms" rows="3" placeholder='{"鼠标":"滑鼠"}'>{}</textarea><label class="field" for="quality-exclusions">Protected names or phrases (one per line)</label><textarea id="quality-exclusions" rows="3"></textarea><p>Prompts, message roles, labels, metadata, code, URLs and quotations stay unchanged. Default editable scope: completion or final assistant answer.</p><button class="button primary" type="submit">Start audit</button></form><h2>Saved audits</h2>${audits.map(a=>`<p><a href="#/quality/${encodeURIComponent(a.id)}">${qualityEscape(a.dataset?.displayName || a.id.slice(0,8))}</a> · ${qualityEscape(a.status)} · ${qualityEscape(a.coverage)} · ${a.scannedRows || 0} rows scanned</p>`).join('') || '<p>No audits yet.</p>'}<h2>Reviewed dataset versions</h2>${versions.map(v=>`<p><a href="/api/quality/versions/${encodeURIComponent(v.id)}/export">${qualityEscape(v.dataset.displayName)}</a> · ${v.rows} rows · ${v.edits} edits</p>`).join('') || '<p>No corrected versions yet.</p>'}`;
+    document.querySelector('#quality-content').innerHTML = `<form id="quality-audit-form"><h2>Audit a local dataset</h2><p>No training minimum and no GPU required. OpenCC suggests conversions; it does not prove a passage is wrong. Names need reviewer judgment.</p><label class="field" for="quality-source">Previously imported dataset</label><select id="quality-source"><option value="">Upload a file below</option>${sources.map((s,i)=>`<option value="${i}">${qualityEscape(s.label)}</option>`).join('')}</select><label class="field" for="quality-file">Dataset file</label><input id="quality-file" type="file" accept=".jsonl,.csv,.parquet"><label class="field" for="quality-mode">Scan scope</label><select id="quality-mode"><option value="full">Background full scan</option><option value="sample">Quick sample — at most 600 rows, not a full audit</option></select><label><input id="quality-raw" type="checkbox"> Allow corrections to raw text field (never labels)</label><label class="field" for="quality-terms">Customer terminology mappings (JSON object)</label><textarea id="quality-terms" rows="3" placeholder='{"鼠标":"滑鼠"}'>{}</textarea><label class="field" for="quality-exclusions">Protected names or phrases (one per line)</label><textarea id="quality-exclusions" rows="3"></textarea><p>Prompts, message roles, labels, metadata, code, URLs and quotations stay unchanged. Default editable scope: completion or final assistant answer.</p><button class="button primary" type="submit">Start audit</button></form><h2>Saved audits</h2>${audits.map(a=>`<p><a href="#/quality/${encodeURIComponent(a.id)}">${qualityEscape(a.dataset?.displayName || a.id.slice(0,8))}</a> · ${qualityEscape(a.status)} · ${qualityEscape(a.coverage)} · ${a.scannedRows || 0} rows scanned</p>`).join('') || '<p>No audits yet.</p>'}<h2>Reviewed dataset versions</h2>${versions.map(v=>`<p><a href="/api/quality/versions/${encodeURIComponent(v.id)}/export">${qualityEscape(v.dataset.displayName)}</a> · ${v.rows} rows · ${v.edits} edits · <a href="#/quality-comparisons/new/${encodeURIComponent(v.id)}">Compare original vs reviewed</a></p>`).join('') || '<p>No corrected versions yet.</p>'}`;
     document.querySelector('#quality-audit-form').onsubmit = async event => {
       event.preventDefault();
       const button = event.submitter; button.disabled = true;
@@ -68,7 +68,7 @@ async function qualityReview(id, offset=0) {
     event.target.disabled=true;
     try {
       const version=await qualityRequest(`/audits/${id}/versions`,{fingerprint:audit.fingerprint});
-      document.querySelector('#quality-version-result').innerHTML=`<p>New version saved: ${version.rows} rows, ${version.edits} approved edits. Original preserved.</p><div class="quality-actions"><a class="button" href="/api/quality/versions/${version.id}/export">Export dataset</a><a class="button" href="/api/quality/versions/${version.id}/export?kind=report">Export audit report</a><a class="button" href="#/quality-evaluations">Evaluate</a><button class="button" id="quality-train">Fine-tune</button></div><p>Fine-tune opens the existing analysis and approval workflow. It does not start training.</p>`;
+      document.querySelector('#quality-version-result').innerHTML=`<p>New version saved: ${version.rows} rows, ${version.edits} approved edits. Original preserved.</p><div class="quality-actions"><a class="button" href="/api/quality/versions/${version.id}/export">Export dataset</a><a class="button" href="/api/quality/versions/${version.id}/export?kind=report">Export audit report</a><a class="button" href="#/quality-evaluations">Evaluate</a><a class="button" href="#/quality-comparisons/new/${encodeURIComponent(version.id)}">Compare original vs reviewed</a><button class="button" id="quality-train">Fine-tune</button></div><p>Fine-tune opens the existing analysis and approval workflow. It does not start training.</p>`;
       document.querySelector('#quality-train').onclick=async()=>{try{await analyzeImportedDataset(version.dataset,null,false);}catch(e){qualityError(e);}};
     } catch(e){qualityError(e);} finally{event.target.disabled=false;}
   });
@@ -127,4 +127,109 @@ async function qualityEvaluationResult(id) {
   document.querySelector('#quality-content').insertAdjacentHTML('afterbegin',benchmarkNote);
   document.querySelector('#quality-eval-cancel')?.addEventListener('click',async()=>{try{await qualityRequest(`/evaluations/${id}/cancel`,{});await qualityEvaluationResult(id);}catch(e){qualityError(e);}});
   if(['queued','running','cancelling'].includes(record.status)) qualityTimer=setTimeout(()=>qualityEvaluationResult(id).catch(qualityError),1500);
+}
+const qualityComparisonModels = [['base','Base'],['original','Original-trained'],['reviewed','Reviewed-trained']];
+const qualityComparisonSteps = {prepare:'Prepare split and files','train-original':'Train on original data','train-reviewed':'Train on reviewed data','evaluate-base':'Evaluate base model','evaluate-original':'Evaluate original-trained','evaluate-reviewed':'Evaluate reviewed-trained',report:'Build report'};
+const qualityActive = status => ['queued','running','cancelling'].includes(status);
+const qualityNumber = (value, digits=1) => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(digits);
+const qualityDuration = seconds => { const s = Math.max(0, Math.round(Number(seconds) || 0)); return s >= 60 ? `${Math.floor(s/60)} min ${s%60} s` : `${s} s`; };
+function qualityMark(text, terms) {
+  const unique = [...new Set((terms || []).filter(Boolean))].sort((a,b)=>b.length-a.length);
+  if (!unique.length) return qualityEscape(text);
+  const pattern = new RegExp('(' + unique.map(t=>t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') + ')');
+  return String(text ?? '').split(pattern).map((part,i)=>i % 2 ? `<mark>${qualityEscape(part)}</mark>` : qualityEscape(part)).join('');
+}
+async function qualityComparisons(id, versionId) {
+  qualityHeader('Comparisons','Train one TAIDE QLoRA adapter on the original rows and one on the reviewed rows, then measure listed-term usage against the base model.');
+  try {
+    if (id === 'new') return await qualityComparisonStart(versionId);
+    if (id) return await qualityComparisonView(id);
+    const items = await qualityRequest('/comparisons');
+    if (route() !== 'quality-comparisons') return;
+    document.querySelector('#quality-content').innerHTML = `<h2>Saved comparisons</h2>${items.map(c=>`<article class="quality-finding"><p><a href="#/quality-comparisons/${encodeURIComponent(c.id)}"><strong>${qualityEscape(c.displayName || c.id.slice(0,8))}</strong></a> · <span class="pill ${c.status === 'complete' ? 'complete' : ''}">${qualityEscape(c.status)}</span> · ${qualityEscape(new Date(c.createdAt).toLocaleString())}</p>${c.headline ? `<p>${qualityEscape(c.headline)}</p>` : ''}</article>`).join('') || '<p>No comparisons yet.</p>'}<p>Start a comparison from a reviewed version in <a href="#/quality">Dataset quality</a> (“Compare original vs reviewed”).</p>`;
+  } catch(e) {qualityError(e);}
+}
+async function qualityComparisonStart(versionId) {
+  const versions = await qualityRequest('/versions');
+  const here = 'quality-comparisons/new/' + versionId;
+  if (route() !== here) return;
+  const version = versions.find(v=>v.id === versionId);
+  document.querySelector('#quality-content').innerHTML = `<h2>Compare original vs reviewed</h2><p>${version ? `${qualityEscape(version.dataset.displayName)} · ${version.rows} rows · ${version.edits} edits` : 'This reviewed version was not found in the saved versions list.'}</p><form id="quality-comparison-form" novalidate><div class="form-row"><label class="field">Training rows per run (blank = all available, capped at 500)<input id="qc-train-rows" type="number" min="100" max="5000" step="1" placeholder="All, up to 500"></label><label class="field">Share of training rows the review edited (0–1)<input id="qc-edited-share" type="number" min="0" max="1" step="0.05" value="0.5" required></label><label class="field">Epochs<select id="qc-epochs"><option>1</option><option selected>2</option><option>3</option></select></label><label class="field">Evaluation prompts (20–200)<input id="qc-eval-prompts" type="number" min="20" max="200" step="1" value="60" required></label></div><div id="quality-estimate" class="quality-estimate" role="status" aria-live="polite">Estimating…</div><button class="button primary" id="qc-start" type="submit" disabled>Start comparison</button></form>`;
+  const form = document.querySelector('#quality-comparison-form'), start = document.querySelector('#qc-start'), panel = document.querySelector('#quality-estimate');
+  let body = null, ticket = 0;
+  const read = () => {
+    const rows = document.querySelector('#qc-train-rows').value;
+    const next = {versionId, editedShare:Number(document.querySelector('#qc-edited-share').value), epochs:Number(document.querySelector('#qc-epochs').value), evalPrompts:Number(document.querySelector('#qc-eval-prompts').value)};
+    if (rows) next.trainRows = Number(rows);
+    return next;
+  };
+  const show = (reasons, facts='') => {
+    panel.innerHTML = facts + (reasons.length ? `<p><strong>This comparison can’t start yet:</strong></p><ul class="quality-reasons">${reasons.map(r=>`<li>${qualityEscape(r)}</li>`).join('')}</ul>` : '<p><strong>Ready to start.</strong> Both runs and all three evaluations fit the per-run cap and the GPU ledger.</p>');
+  };
+  const estimate = async () => {
+    const mine = ++ticket;
+    start.disabled = true; body = null;
+    const invalid = [...form.querySelectorAll('input')].filter(input=>!input.checkValidity());
+    if (invalid.length) return show(invalid.map(input=>`${input.closest('label').firstChild.textContent.trim()}: ${input.validationMessage}`));
+    const request = read();
+    panel.textContent = 'Estimating…';
+    try {
+      const result = await qualityRequest('/comparisons/estimate', request);
+      if (mine !== ticket || route() !== here) return;
+      const s = result.split || {}, e = result.estimate || {};
+      const fact = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
+      show(e.reasons || s.reasons || [], `<dl class="quality-facts">${fact('Rows in version', s.rows ?? '—')}${fact('Rows the review edited', s.edited ?? '—')}${fact('Eligible eval prompts', s.eligibleEval ?? '—')}${fact('Edited rows in training', s.trainEdited ?? '—')}${fact('Rows skipped (too long)', s.skippedLong ?? '—')}${fact('GPU-seconds (total)', e.totalGpuSeconds ?? '—')}${fact('Wall-clock', e.wallClockSeconds == null ? '—' : `≈ ${Math.ceil(e.wallClockSeconds/60)} min`)}${fact('Ledger remaining', e.ledgerRemaining == null ? '—' : `${Math.floor(e.ledgerRemaining)} s`)}</dl><p>Per training run ≈ ${e.trainSecondsPerRun ?? '—'} s · per evaluation ≈ ${e.evalSecondsBase ?? '—'} s base, ${e.evalSecondsAdapter ?? '—'} s per adapter · per-run cap ${e.perRunCap ?? '—'} s.</p>`);
+      if (result.feasible) { body = request; start.disabled = false; }
+    } catch(error) { if (mine === ticket) show([error.message]); }
+  };
+  form.oninput = form.onchange = () => { body = null; start.disabled = true; ticket++; clearTimeout(qualityTimer); qualityTimer = setTimeout(estimate, 400); };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (!body || !confirm('Start the comparison? It trains two adapters and runs three evaluations on the GPU, charged to the shared ledger.')) return;
+    start.disabled = true;
+    try { const record = await qualityRequest('/comparisons', body); location.hash = '#/quality-comparisons/' + record.id; }
+    catch(e) { qualityError(e); start.disabled = false; }
+  };
+  await estimate();
+}
+function qualityStepTracker(record) {
+  return `<ol class="quality-steps">${(record.steps || []).map(step=>{
+    const elapsed = step.startedAt ? ((step.completedAt ? Date.parse(step.completedAt) : Date.now()) - Date.parse(step.startedAt)) / 1000 : null;
+    const meta = [elapsed == null ? 'not started' : `elapsed ${qualityDuration(elapsed)}`, `${Math.round(step.gpuSeconds || 0)} GPU-s`];
+    if (step.attempts > 1) meta.push(`attempt ${step.attempts}`);
+    return `<li class="${qualityEscape(step.status)}"><strong>${qualityEscape(qualityComparisonSteps[step.name] || step.name)}</strong><span class="pill ${step.status === 'complete' ? 'complete' : ''}">${qualityEscape(step.status)}</span><span class="quality-step-meta">${meta.join(' · ')}${step.runId ? ` · <a href="#/runs/${encodeURIComponent(step.runId)}">View run</a>` : ''}</span>${step.message ? `<span class="quality-step-meta quality-reasons">${qualityEscape(step.message)}</span>` : ''}</li>`;
+  }).join('')}</ol>`;
+}
+function qualityComparisonResult(record) {
+  const report = record.report, models = report.models || {}, split = record.split || {}, settings = record.settings || {};
+  const present = qualityComparisonModels.filter(([key])=>models[key]);
+  const cell = fn => present.map(([key])=>`<td>${fn(models[key])}</td>`).join('');
+  const count = (n, total) => `${n ?? '—'} / ${total ?? '—'}`;
+  const mcq = m => m.tmmluplusAccuracy == null ? '—' : `${Math.round(m.tmmluplusAccuracy * m.tmmluplusAnswered)} / ${m.tmmluplusAnswered} (${Math.round(m.tmmluplusAccuracy * 100)}%)`;
+  const table = `<div class="quality-table-wrap"><table class="quality-table"><thead><tr><th scope="col">Measure</th>${present.map(([,label])=>`<th scope="col">${label}</th>`).join('')}</tr></thead><tbody><tr><th scope="row">Listed terms per 1,000 chars</th>${cell(m=>qualityNumber(m.termsPer1k))}</tr><tr><th scope="row">OpenCC suggestions per 1,000 chars</th>${cell(m=>qualityNumber(m.openccPer1k))}</tr><tr><th scope="row">Answers with a listed term</th>${cell(m=>count(m.answersWithTerm, m.writingAnswered))}</tr><tr><th scope="row">Answers with an OpenCC suggestion</th>${cell(m=>count(m.answersWithOpencc, m.writingAnswered))}</tr><tr><th scope="row">TMMLU+ correct</th>${cell(mcq)}</tr><tr><th scope="row">Mean training loss</th>${cell(m=>qualityNumber(m.trainLoss, 2))}</tr></tbody></table></div>`;
+  const max = Math.max(0, ...present.map(([key])=>Number(models[key].termsPer1k) || 0));
+  const bars = `<div class="quality-bars">${present.map(([key,label])=>{const v = models[key].termsPer1k, w = max && v != null ? v / max * 100 : 0; return `<div class="quality-bar" title="${label}: ${qualityNumber(v)} listed terms per 1,000 characters (${count(models[key].answersWithTerm, models[key].writingAnswered)} answers)"><span>${label}</span><span class="quality-bar-track" aria-hidden="true"><i style="width:${w.toFixed(1)}%"></i></span><strong>${qualityNumber(v)}</strong></div>`;}).join('')}</div>`;
+  const p = report.paired || {}, pairs = (p.originalOnly || 0) + (p.reviewedOnly || 0) + (p.both || 0) + (p.neither || 0);
+  const tile = (n, text) => `<div><dt>${text}</dt><dd>${n ?? 0} <small>of ${pairs} prompts</small></dd></div>`;
+  const paired = `<dl class="quality-facts">${tile(p.originalOnly,'Original-trained used a listed term, reviewed-trained did not')}${tile(p.reviewedOnly,'Reviewed-trained used a listed term, original-trained did not')}${tile(p.both,'Both used a listed term')}${tile(p.neither,'Neither used a listed term')}</dl>`;
+  const examples = (report.examples || []).slice(0,5).map(x=>`<article class="quality-example"><p class="quality-example-prompt"><strong>Prompt</strong> ${qualityEscape(x.prompt)}</p><div class="quality-answers">${qualityComparisonModels.filter(([key])=>x.answers?.[key] != null).map(([key,label])=>{const hits = x.hits?.[key] || []; return `<div><h3>${label}</h3><pre>${qualityMark(x.answers[key], hits)}</pre><p class="quality-step-meta">${hits.length ? `Listed terms: ${hits.map(qualityEscape).join(', ')}` : 'No listed terms'}</p></div>`;}).join('')}</div></article>`).join('');
+  const trainSize = Array.isArray(split.train) ? split.train.length : split.settings?.trainRows;
+  const evalSize = Array.isArray(split.eval) ? split.eval.length : settings.evalPrompts;
+  const gpu = (record.steps || []).reduce((sum, s)=>sum + (Number(s.gpuSeconds) || 0), 0);
+  const runs = report.runs || {};
+  const measured = `<aside class="quality-measured"><h2>How this was measured</h2><ul><li>Edited share: ${split.counts?.trainEdited ?? '—'} of ${trainSize ?? '—'} training rows per run were edited by the review (requested ${Math.round((settings.editedShare ?? 0.5) * 100)}%). Train size ${trainSize ?? '—'} rows, ${settings.epochs ?? 2} epochs; both runs use the same rows and differ only in the review’s edits.</li><li>Eval prompts were chosen from rows the review changed, not at random.</li><li>Sample size: ${evalSize ?? '—'} writing prompts and ${models.base?.tmmluplusAnswered ?? '—'} TMMLU+ questions per model; split seed ${split.settings?.seed ?? 42}. Writing answers are 128-token samples.</li><li>Truncated samples: ${present.map(([key,label])=>`${label} ${models[key].truncated ?? 0} of ${models[key].writingAnswered ?? 0}`).join(' · ')}.</li><li>Model: TAIDE, 4-bit QLoRA, revision ${qualityEscape(record.modelRevision || 'not recorded')}; TMMLU+ revision ${qualityEscape(record.benchmarkRevision || 'not recorded')}.</li><li>GPU-seconds used: ${Math.round(gpu)} s across all steps.</li></ul></aside>`;
+  return `<p class="quality-headline">${qualityEscape(report.headline)}</p><h2>Results by model</h2>${table}<h2>Listed terms per 1,000 characters</h2><p>Lower is better: fewer terms from the customer list appear in the answers.</p>${bars}<h2>Paired prompts</h2><p>The same prompt answered by both adapters.</p>${paired}${examples ? `<h2>Examples where the adapters differ</h2>${examples}` : ''}${measured}<div class="quality-actions"><a class="button primary" href="/api/quality/comparisons/${encodeURIComponent(record.id)}/export">Export comparison (JSON)</a>${['original','reviewed'].filter(v=>runs[v]).map(v=>`<a class="button" href="#/runs/${encodeURIComponent(runs[v])}">${v === 'original' ? 'Original' : 'Reviewed'}-trained run</a>`).join('')}</div><details><summary>Steps</summary>${qualityStepTracker(record)}</details>`;
+}
+async function qualityComparisonView(id) {
+  const record = await qualityRequest('/comparisons/' + encodeURIComponent(id));
+  if (route() !== 'quality-comparisons/' + id) return;
+  const active = qualityActive(record.status);
+  const done = record.status === 'complete' && record.report;
+  document.querySelector('#quality-content').innerHTML = `<h2>${qualityEscape(record.displayName || 'Comparison')}</h2><p role="status"><span class="pill ${record.status === 'complete' ? 'complete' : ''}">${qualityEscape(record.status)}</span> ${qualityEscape(record.message || '')}</p>${done ? qualityComparisonResult(record) : `${qualityStepTracker(record)}${active && record.status !== 'cancelling' ? '<button class="button danger" id="quality-comparison-cancel">Cancel comparison</button>' : ''}${record.status === 'cancelling' ? '<p>Cancelling — the running step stops at its next checkpoint.</p>' : ''}`}`;
+  document.querySelector('#quality-comparison-cancel')?.addEventListener('click', async event => {
+    if (!confirm('Cancel this comparison? Finished steps are kept; the running step stops.')) return;
+    event.target.disabled = true;
+    try { await qualityRequest(`/comparisons/${encodeURIComponent(id)}/cancel`, {}); await qualityComparisonView(id); } catch(e) { qualityError(e); event.target.disabled = false; }
+  });
+  if (active) qualityTimer = setTimeout(()=>qualityComparisonView(id).catch(qualityError), 3000);
 }

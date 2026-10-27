@@ -15,6 +15,7 @@ from pathlib import Path
 from advisor import input_key
 from quality_models import TAIDE_ID, fingerprint, get_model_status, load_benchmark
 from quality_pilot import _runtime_directory, budget_status, generate_bounded, run_with_pilot_budget
+from comparison import leading_letter, policy_hits, scoring_policy
 from quality_policy import CUSTOMER_TERM_REASON, inspect_text, row_problem
 
 DATASET_ID = "yentinglin/TaiwanChat"
@@ -46,10 +47,7 @@ def sha256(path):
 
 
 def approved_policy(terms_file):
-    # A replacement containing its own source term (算法→演算法) must be protected, or correct text
-    # is flagged and rewritten again (演算法→演演算法).
-    self_containing = [r for t, r in terms_file["terms"].items() if t in r]
-    return {"terms": terms_file["terms"], "exclusions": sorted(set(terms_file.get("exclusions", []) + self_containing))}
+    return scoring_policy({k: terms_file[k] for k in ("terms", "exclusions") if k in terms_file})
 
 
 def apply_terms(text, policy):
@@ -57,10 +55,6 @@ def apply_terms(text, policy):
     for f in sorted(findings, key=lambda f: -f["start"]):
         text = text[:f["start"]] + f["replacement"] + text[f["end"]:]
     return text, [f["original"] for f in findings]
-
-
-def mainland_hits(text, policy):
-    return [f["original"] for f in inspect_text(text, policy) if f["reason"] == CUSTOMER_TERM_REASON]
 
 
 def prepare(args):
@@ -91,7 +85,7 @@ def prepare(args):
         if key in seen:
             continue
         record = {"source": row["id"], "sourceIndex": index, "messages": messages}
-        hits = bool(mainland_hits(messages[-1]["content"], policy))
+        hits = bool(policy_hits(messages[-1]["content"], policy)["terms"])
         fits = lambda: len(tokenizer.apply_chat_template(messages, tokenize=True)) <= args.max_tokens
         wants_train = (hits and term_rows < term_quota) or (not hits and plain_rows < plain_quota)
         if len(dev) < args.dev and fits():
@@ -201,11 +195,6 @@ def evaluate(args):
     print(json.dumps({"model": args.model, "answered": len(answers), "overLimit": len(over_limit), "unanswered": len(remaining), "budget": budget_status(args.runtime_root)}, ensure_ascii=False, indent=2))
 
 
-def leading_letter(text):
-    text = text.strip()
-    return text[:1] if text and text[0] in "ABCD" and (len(text) == 1 or not text[1].isalnum()) else None
-
-
 def report(args):
     directory, manifest = load_manifest(args.runtime_root)
     policy = approved_policy(manifest["terms"])
@@ -218,7 +207,7 @@ def report(args):
         data = json.loads(path.read_text(encoding="utf-8"))
         mcq = [a for a in data["answers"] if a["caseId"] in references]
         writing = [a for a in data["answers"] if a["caseId"].startswith("taiwanchat:")]
-        hits = [mainland_hits(a["output"], policy) for a in writing]
+        hits = [policy_hits(a["output"], policy)["terms"] for a in writing]
         chars = sum(len(a["output"]) for a in writing)
         results[model] = {
             "tmmluplusAccuracy": sum(leading_letter(a["output"]) == references[a["caseId"]]["reference"] for a in mcq) / len(mcq) if mcq else None,

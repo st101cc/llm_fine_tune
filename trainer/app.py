@@ -470,7 +470,8 @@ async def run_training(run_id: str) -> None:
             stop = threading.Event()
             active_quality_training[run_id] = stop
             try:
-                budget = await asyncio.to_thread(run_with_pilot_budget, DATA_ROOT, [command], cancelled=stop.is_set, log_dir=run_path(run_id).parent)
+                admission = {'load_mode': 'bnb4'} if record.get('config', {}).get('parameter_method') == 'qlora' else {}
+                budget = await asyncio.to_thread(run_with_pilot_budget, DATA_ROOT, [command], cancelled=stop.is_set, log_dir=run_path(run_id).parent, **admission)
                 record = read_run(run_id)
                 record.update(qualityBudget=budget, message=budget.get('message'))
                 write_run(record)
@@ -887,6 +888,8 @@ async def get_logs(run_id: str) -> dict:
 @app.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> dict:
     record = read_run(run_id)
+    if record.get("managedBy"):
+        raise HTTPException(409, f"This run is managed by comparison {record['managedBy']}; cancel the comparison instead.")
     if run_id in active_quality_training:
         active_quality_training[run_id].set()
     process = active_processes.get(run_id)

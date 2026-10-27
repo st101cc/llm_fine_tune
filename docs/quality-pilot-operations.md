@@ -29,10 +29,10 @@ You may also load a saved ForgeTune workflow by its ID or explicitly generate fr
 Preparation is an explicit network action, separate from quality processing:
 
 ```powershell
-.venv/Scripts/python.exe -B hackathon/trainer/quality_models.py prepare benchmark
-.venv/Scripts/python.exe -B hackathon/trainer/quality_models.py prepare benchmark --all-subjects
+.venv/Scripts/python.exe -B trainer/quality_models.py prepare benchmark
+.venv/Scripts/python.exe -B trainer/quality_models.py prepare benchmark --all-subjects
 # Only after reviewing the license and obtaining required Hugging Face access:
-.venv/Scripts/python.exe -B hackathon/trainer/quality_models.py prepare model
+.venv/Scripts/python.exe -B trainer/quality_models.py prepare model
 ```
 
 TMMLU+ v1.1 resolves to an immutable commit during preparation. Default selection is the first ten test questions each from computer science, finance/banking and official-document management. The all-subjects option selects ten questions per subject, not a full benchmark. Sources and manifests have checksums and remain outside trainable datasets. Evaluation uses fixed zero-shot instructions, greedy generation, strict whole-answer A–D parsing and no silent input truncation. Results are per-subject and per-question aggregates, not official leaderboard scores.
@@ -42,9 +42,13 @@ The current supervised model runner uses FP16, a 4,096-token input-plus-output c
 ## Bounded live pilot
 
 ```powershell
-.venv/Scripts/python.exe -B hackathon/trainer/quality_pilot.py --output .forge-data/quality-pilot-new --runtime-root hackathon/trainer/data --seconds 1800
+.venv/Scripts/python.exe -B trainer/quality_pilot.py --output .forge-data/quality-pilot-new --runtime-root trainer/data --seconds 1800
 ```
 
 Use a new output directory. The frozen synthetic fixture is structured extraction with disjoint train/development/test cases. Original and fixture-author-reviewed variants use identical eight-step training settings. Fixture decisions are explicit synthetic author approvals, not invented production reviewer records. Test material is never used for training; overlap is checked again after corrections.
 
 The persistent GPU budget is aggregate across quality inference, pilot phases and quality-approved training, including load time and failed attempts. Unfinished reservations remain charged after a crash. Do not delete or reset the budget ledger to obtain another allowance. The supervisor terminates only its owned worker tree at its deadline; no unrelated GPU workload is stopped. No adapter is automatically deployed. Actual tokenizer/mask/reload verification remains incomplete until authorized weights and adequate existing hardware are available.
+
+## Compare original vs reviewed
+
+After "Create dataset version" on a full audit (Dataset quality page), open "Compare original vs reviewed" next to that version, or use Comparisons. The page shows a live estimate (GPU-seconds, wall clock, ledger remaining) and disables Start when the estimate is infeasible or exceeds the ledger. Defaults: up to 500 training rows with 50% edited by the review, 2 epochs, 60 evaluation prompts. Start launches one resumable job: two QLoRA adapters (original and reviewed answers) train in parallel on the two T4s, then base, original-trained and reviewed-trained models are evaluated, and the result page shows listed-term rates, paired prompt counts, examples, TMMLU+ and an export. Both training runs also appear on Training runs, marked `managedBy` the comparison id. The job charges the same GPU ledger; cancel from the page if needed. Evaluation prompts come from rows the review edited, so the result measures term usage, not general quality.

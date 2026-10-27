@@ -107,6 +107,15 @@ def _select_idle_gpu(gpu=None, *, load_mode="fp16"):
         return None, "gpu_unavailable", "Cannot inspect GPU availability. Check NVIDIA drivers and nvidia-smi; no GPU was selected."
 
 
+def idle_gpus(load_mode="bnb4"):
+    try:
+        inventory = subprocess.check_output(["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader,nounits"], text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    uuids = [line.strip() for line in inventory.splitlines() if re.fullmatch(r"GPU-[A-Za-z0-9-]+", line.strip())]
+    return [uuid for uuid in uuids if _select_idle_gpu(uuid, load_mode=load_mode)[0]]
+
+
 def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, max_seconds=1800, log_dir=None, load_mode="fp16"):
     """Server-owned argument lists only; shares the generation budget ledger.
 
@@ -147,7 +156,7 @@ def run_with_pilot_budget(root, commands, *, gpu=None, cancelled=lambda: False, 
         _settle_budget(root, reservation, charged)
 
 
-def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, max_seconds=1800, revision=None, load_mode="fp16", writing_sample_tokens=None):
+def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=None, cancelled=lambda: False, max_seconds=1800, revision=None, load_mode="fp16", writing_sample_tokens=None, gpu=None):
     """Route-safe offline inference: reserved persistent budget + owned subprocess.
 
     Status reads do not infer license acceptance. No download or training occurs.
@@ -181,7 +190,7 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
     request = {"loadMode": load_mode, "cases": cases, "modelId": model_id, "revision": status["revision"], "adapterPath": str(Path(adapter_path).resolve()) if adapter_path else None, "writingSampleTokens": writing_sample_tokens}
     (directory / "request.json").write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
     command = [sys.executable, "-B", str(Path(__file__).resolve()), "--output", str(directory), "--model", model_id, "--revision", status["revision"], "--worker", "generate"]
-    run = run_with_pilot_budget(runtime_root, [command], max_seconds=max_seconds, cancelled=cancelled, log_dir=directory, **({"load_mode": load_mode} if load_mode != "fp16" else {}))
+    run = run_with_pilot_budget(runtime_root, [command], gpu=gpu, max_seconds=max_seconds, cancelled=cancelled, log_dir=directory, **({"load_mode": load_mode} if load_mode != "fp16" else {}))
     result_path = directory / "answers.json"
     partial = json.loads(result_path.read_text(encoding="utf-8")).get("answers", []) if result_path.is_file() else []
     if run["status"] in ("cancelled", "budget_exhausted", "unavailable"):
