@@ -1,7 +1,9 @@
 import importlib.util
 import json
 import time
+import uuid
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -210,3 +212,159 @@ def test_missing_source_is_422_not_503(tmp_path, monkeypatch):
             response = client.post(route, json={'versionId': version['id']})
             assert response.status_code == 422, response.text
             assert response.json()['detail'] == 'Source dataset is missing; start a new audit.'
+
+
+READY = {n: {'modelId': n, 'revision': n[0] * 40, 'status': 'ready', 'path': '/m'} for n in ('breeze', 'qwen', 'yi')}
+
+
+@pytest.fixture
+def judges(monkeypatch):
+    import quality_models
+    import panel_job
+    import comparison_job
+    monkeypatch.setattr(quality_models, 'judge_status', lambda root: READY)
+    monkeypatch.setattr(panel_job, 'run_panel', lambda *args, **kwargs: None)
+    monkeypatch.setattr(comparison_job, 'run_comparison', lambda *args, **kwargs: None)
+
+
+def panel_client(tmp_path, cases=25, **kwargs):
+    from quality_store import QualityStore
+    from test_judge_panel import make_comparison
+    store = QualityStore(tmp_path)
+    comparison_id = make_comparison(store, cases=cases, **kwargs)
+    return store, comparison_id, setup_client(tmp_path)[0]
+
+
+def test_panel_estimate_for_comparison_defaults_to_20_prompts(tmp_path, judges):
+    _, comparison_id, client = panel_client(tmp_path)
+    with client:
+        response = client.post('/quality/panels/estimate', json={'source': {'comparisonId': comparison_id}})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body['items'] == 60 and body['prompts'] == 20 and body['maxPrompts'] == 25 and body['referenceMode'] == 'none'
+        assert body['candidates'] == ['base', 'original', 'reviewed'] and body['truncatedUnknown'] is False
+        assert body['feasible'] is True and body['reasons'] == [] and body['estimate']['gradesPerJudge'] == 60
+        assert body['judges'] == READY and body['selfGrading'] == {}
+        body = client.post('/quality/panels/estimate', json={'source': {'comparisonId': comparison_id}, 'prompts': 100}).json()
+        assert body['prompts'] == 25 and body['items'] == 75
+        assert client.post('/quality/panels/estimate', json={'source': {'comparisonId': comparison_id}, 'prompts': 0}).status_code == 422
+
+
+def test_panel_estimate_refuses_missing_judge(tmp_path, judges, monkeypatch):
+    import quality_models
+    monkeypatch.setattr(quality_models, 'judge_status', lambda root: {**READY, 'yi': {**READY['yi'], 'status': 'missing_weights'}})
+    _, comparison_id, client = panel_client(tmp_path)
+    with client:
+        body = client.post('/quality/panels/estimate', json={'source': {'comparisonId': comparison_id}}).json()
+        assert body['feasible'] is False and body['reasons'] == ['yi: missing_weights']
+        response = client.post('/quality/panels', json={'source': {'comparisonId': comparison_id}})
+        assert response.status_code == 422 and 'yi: missing_weights' in response.json()['detail']
+        assert client.get('/quality/panels').json() == []
+
+
+def test_panel_estimate_rejects_unknown_or_double_source(tmp_path, judges):
+    _, comparison_id, client = panel_client(tmp_path)
+    with client:
+        for source in ({}, {'other': 'x'}, {'evaluationId': 'a', 'comparisonId': comparison_id}, {'comparisonId': comparison_id, 'extra': 1},
+                       {'comparisonId': 'missing'}, {'evaluationId': 'missing'}, {'comparisonId': 5}):
+            for route in ('/quality/panels/estimate', '/quality/panels'):
+                assert client.post(route, json={'source': source}).status_code == 422, (route, source)
+
+
+def test_panel_estimate_for_incomplete_comparison_is_422(tmp_path, judges):
+    _, comparison_id, client = panel_client(tmp_path, status='running')
+    with client:
+        response = client.post('/quality/panels/estimate', json={'source': {'comparisonId': comparison_id}})
+        assert response.status_code == 422 and response.json()['detail'] == 'comparison has no saved evaluation answers'
+
+
+def test_panel_estimate_for_evaluation_flags_uploaded_answers(tmp_path, judges):
+    from quality_store import QualityStore
+    from test_judge_panel import make_evaluation
+    evaluation_id = make_evaluation(QualityStore(tmp_path))
+    with setup_client(tmp_path)[0] as client:
+        body = client.post('/quality/panels/estimate', json={'source': {'evaluationId': evaluation_id}}).json()
+        assert body['referenceMode'] == 'case' and body['truncatedUnknown'] is True and body['maxPrompts'] == 2 and body['items'] == 4
+        assert body['selfGrading'] == {'Qwen2.5-7B@base': 'qwen'}
+
+
+def test_panel_and_comparison_are_mutually_exclusive(tmp_path, judges):
+    import comparison_job
+    from quality_store import QualityStore
+    _, comparison_id, client = panel_client(tmp_path / 'a')
+    source = {'source': {'comparisonId': comparison_id}}
+    with client:
+        response = client.post('/quality/panels', json=source)
+        assert response.status_code == 202, response.text
+        record = response.json()
+        assert record['status'] == 'queued' and record['prompts'] == 20 and record['source'] == {'comparisonId': comparison_id}
+        assert client.post('/quality/comparisons', json={'versionId': 'v'}).status_code == 409
+        assert client.post('/quality/panels', json=source).status_code == 409
+        assert [p['id'] for p in client.get('/quality/panels').json()] == [record['id']]
+    (tmp_path / 'b').mkdir()
+    store = QualityStore(tmp_path / 'b')
+    store.put('comparison', comparison_job.new_record('v', {}) | {'status': 'running'})
+    _, comparison_id, client = panel_client(tmp_path / 'b')
+    with client:
+        assert client.post('/quality/panels', json={'source': {'comparisonId': comparison_id}}).status_code == 409
+
+
+def test_panel_export_shape_and_label(tmp_path, judges):
+    store, comparison_id, client = panel_client(tmp_path)
+    vote = {'correctness': {'verdict': 'pass', 'reason': 'ok'}, 'language': {'verdict': 'pass', 'reason': 'ok'}}
+    with client:
+        record = client.post('/quality/panels', json={'source': {'comparisonId': comparison_id}, 'prompts': 2}).json()
+        folder = store.directory / 'panels' / record['id']
+        folder.mkdir(parents=True)
+        (folder / 'items.jsonl').write_text(json.dumps({'itemId': 'row:0|base'}) + '\n', encoding='utf-8')
+        (folder / 'grades-breeze.jsonl').write_text(json.dumps({'itemId': 'row:0|base', 'vote': vote}) + '\n{"itemId": "row:', encoding='utf-8')
+        store.put('panel', {**record, 'status': 'complete', 'report': {'incomplete': False}})
+        listed = client.get('/quality/panels').json()
+        assert listed == [{'id': record['id'], 'displayName': record['displayName'], 'status': 'complete', 'createdAt': record['createdAt'], 'source': record['source']}]
+        assert client.get('/quality/panels/' + record['id']).json()['report'] == {'incomplete': False}
+        export = client.get(f'/quality/panels/{record["id"]}/export')
+        assert export.status_code == 200 and f'panel-{record["id"]}.json' in export.headers['content-disposition']
+        body = export.json()
+        assert set(body) == {'panel', 'items', 'grades', 'report', 'label'} and 'report' not in body['panel'] and body['panel']['id'] == record['id']
+        assert body['items'] == [{'itemId': 'row:0|base'}] and body['report'] == {'incomplete': False}
+        assert body['grades'] == {'breeze': [{'itemId': 'row:0|base', 'vote': vote}], 'qwen': [], 'yi': []}
+        assert body['label'] == 'estimated by local models, not verified'
+        assert client.get('/quality/panels/' + str(uuid.uuid4()) + '/export').status_code == 404
+
+
+def test_panel_never_changes_evaluation_judgments(tmp_path, judges, monkeypatch):
+    import panel_job
+    from quality_store import QualityStore
+    from test_judge_panel import make_evaluation
+    store = QualityStore(tmp_path)
+    evaluation_id = make_evaluation(store)
+
+    def finish(target, root, panel_id, stop, **_):
+        record = target.get('panel', panel_id)
+        target.put('panel', {**record, 'status': 'complete', 'report': {'incomplete': False}})
+    monkeypatch.setattr(panel_job, 'run_panel', finish)
+    with setup_client(tmp_path)[0] as client:
+        before = client.get('/quality/evaluations/' + evaluation_id).content
+        record = client.post('/quality/panels', json={'source': {'evaluationId': evaluation_id}}).json()
+        assert finished(client, '/quality/panels/' + record['id'])['status'] == 'complete'
+        assert client.get('/quality/evaluations/' + evaluation_id).content == before
+
+
+def test_startup_relaunches_running_panel(tmp_path, judges, monkeypatch):
+    import panel_job
+    from quality_store import QualityStore
+    calls, stopped = [], []
+
+    def recording(store, root, panel_id, stop, **_):
+        calls.append(panel_id)
+        stopped.append(stop.wait(10))
+    monkeypatch.setattr(panel_job, 'run_panel', recording)
+    store = QualityStore(tmp_path)
+    ids = [store.put('panel', panel_job.new_record({'comparisonId': 'c'}, None, 'x') | {'status': status})['id'] for status in ('queued', 'running', 'cancelling', 'complete', 'failed')]
+    with setup_client(tmp_path)[0]:
+        for _ in range(100):
+            if len(calls) == 3:
+                break
+            time.sleep(.03)
+    assert sorted(calls) == sorted(ids[:3]) and stopped == [True] * 3
+    assert store.get('panel', ids[1])['status'] == 'running'

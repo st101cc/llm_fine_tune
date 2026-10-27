@@ -58,6 +58,11 @@ class ComparisonRequest(StrictRequest):
     evalPrompts: int = Field(60, ge=20, le=200)
 
 
+class PanelRequest(StrictRequest):
+    source: dict
+    prompts: int | None = Field(None, ge=1)
+
+
 ACTIVE_COMPARISON = ('queued', 'running', 'cancelling')
 
 
@@ -76,7 +81,7 @@ def guarded(function):
 
 
 def install_quality_routes(app, get_root):
-    stores, jobs, comparisons = {}, {}, {}
+    stores, jobs, comparisons, panels = {}, {}, {}, {}
     lock = threading.RLock()
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='quality')
 
@@ -127,19 +132,43 @@ def install_quality_routes(app, get_root):
             comparisons[comparison_id] = (thread, event)
         thread.start()
 
+    def launch_panel(target, panel_id):
+        import panel_job
+        event = threading.Event()
+
+        def run():
+            try:
+                panel_job.run_panel(target, target.root, panel_id, event)
+            except Exception:
+                if not event.is_set():
+                    record = target.get('panel', panel_id)
+                    record.update(status='failed', message='Panel job failed unexpectedly; check the backend log.')
+                    target.put('panel', record)
+                raise
+            finally:
+                with lock:
+                    panels.pop(panel_id, None)
+        thread = threading.Thread(target=run, daemon=True, name=f'panel-{panel_id}')
+        with lock:
+            panels[panel_id] = (thread, event)
+        thread.start()
+
     @app.on_event('startup')
     def recover():
         target = store()
         for record in target.list('comparison'):
             if record['status'] in ACTIVE_COMPARISON:
                 launch_comparison(target, record['id'])
+        for record in target.list('panel'):
+            if record['status'] in ACTIVE_COMPARISON:
+                launch_panel(target, record['id'])
 
     @app.on_event('shutdown')
     def shutdown():
         with lock:
             for event in jobs.values():
                 event.set()
-            running = list(comparisons.values())
+            running = list(comparisons.values()) + list(panels.values())
         for thread, event in running:
             event.set()
         for thread, _ in running:
@@ -398,6 +427,15 @@ def install_quality_routes(app, get_root):
     def comparison_active(target):
         return any(record['status'] in ACTIVE_COMPARISON for record in target.list('comparison'))
 
+    def panel_active(target):
+        return any(record['status'] in ACTIVE_COMPARISON for record in target.list('panel'))
+
+    def ensure_idle(target):
+        if comparison_active(target):
+            raise HTTPException(409, 'Another comparison is running')
+        if panel_active(target):
+            raise HTTPException(409, 'A judge panel is running')
+
     @app.post('/quality/comparisons/estimate')
     @guarded
     def estimate_comparison(body: ComparisonRequest):
@@ -408,16 +446,14 @@ def install_quality_routes(app, get_root):
     def create_comparison(body: ComparisonRequest):
         import comparison_job
         target = store()
-        if comparison_active(target):
-            raise HTTPException(409, 'Another comparison is running')
+        ensure_idle(target)
         version, plan = plan_comparison(target, body)
         if not plan['feasible']:
             raise ValueError('; '.join(plan['estimate']['reasons']))
         record = comparison_job.new_record(version['id'], body.model_dump(exclude={'versionId'}))
         record['displayName'] = version['dataset'].get('displayName', version['id'])
         with lock:
-            if comparison_active(target):
-                raise HTTPException(409, 'Another comparison is running')
+            ensure_idle(target)
             target.put('comparison', record)
         launch_comparison(target, record['id'])
         return record
@@ -455,3 +491,79 @@ def install_quality_routes(app, get_root):
                 'evalCases': [json.loads(line) for line in cases.read_text(encoding='utf-8').splitlines() if line] if cases.is_file() else [],
                 'answers': answers, 'report': record.get('report')}
         return StreamingResponse(iter([encoded(body)]), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="comparison-{record["id"]}.json"'})
+
+    def plan_panel(target, body):
+        from judge_panel import DEFAULT_PROMPTS, estimate, load_source, sample_items, self_grading_warnings
+        from quality_models import judge_status
+        from quality_pilot import budget_status
+        if set(body.source) not in ({'evaluationId'}, {'comparisonId'}) or not isinstance(next(iter(body.source.values())), str):
+            raise ValueError('Choose exactly one evaluationId or comparisonId.')
+        source = load_source(target, body.source)
+        maximum = len({a['caseId'] for a in source['answers']})
+        prompts = min(body.prompts or DEFAULT_PROMPTS, maximum)
+        items = sample_items(source, prompts)
+        judges = judge_status(target.root)
+        plan = estimate(len(items), budget_status(target.root)['remainingGpuSeconds'], {name: item['status'] == 'ready' for name, item in judges.items()})
+        candidates = sorted({item['candidate'] for item in items})
+        unknown = False
+        if source['kind'] == 'evaluation':
+            recorded = {(a['caseId'], a['candidate']) for a in target.get('evaluation', source['id']).get('generation', {}).get('answers', []) if 'truncated' in a}
+            unknown = any((a['caseId'], a['candidate']) not in recorded for a in source['answers'])
+        return source, {'feasible': plan['feasible'], 'reasons': plan['reasons'], 'items': len(items), 'candidates': candidates, 'prompts': prompts, 'maxPrompts': maximum,
+                        'judges': judges, 'estimate': plan, 'selfGrading': self_grading_warnings(candidates), 'referenceMode': source['referenceMode'], 'truncatedUnknown': unknown}
+
+    @app.post('/quality/panels/estimate')
+    @guarded
+    def estimate_panel(body: PanelRequest):
+        return plan_panel(store(), body)[1]
+
+    @app.post('/quality/panels', status_code=202)
+    @guarded
+    def create_panel(body: PanelRequest):
+        import panel_job
+        target = store()
+        ensure_idle(target)
+        source, plan = plan_panel(target, body)
+        if not plan['feasible']:
+            raise ValueError('; '.join(plan['reasons']))
+        name = target.get('comparison', source['id']).get('displayName') if source['kind'] == 'comparison' else None
+        record = panel_job.new_record(body.source, plan['prompts'], name or f"{source['kind'].capitalize()} {source['id'][:8]}")
+        with lock:
+            ensure_idle(target)
+            target.put('panel', record)
+        launch_panel(target, record['id'])
+        return record
+
+    @app.get('/quality/panels')
+    @guarded
+    def list_panels():
+        return [{'id': r['id'], 'displayName': r.get('displayName'), 'status': r['status'], 'createdAt': r['createdAt'], 'source': r['source']} for r in store().list('panel')]
+
+    @app.get('/quality/panels/{panel_id}')
+    @guarded
+    def get_panel(panel_id: str):
+        return store().get('panel', panel_id)
+
+    @app.post('/quality/panels/{panel_id}/cancel')
+    @guarded
+    def cancel_panel(panel_id: str):
+        record = store().cancel('panel', panel_id)
+        with lock:
+            job = panels.get(record['id'])
+        if job:
+            job[1].set()
+        return record
+
+    @app.get('/quality/panels/{panel_id}/export')
+    @guarded
+    def export_panel(panel_id: str):
+        import panel_job
+        from judge_panel import JUDGES
+        target = store()
+        record = target.get('panel', panel_id)
+        directory = target.directory / 'panels' / identifier(record['id'])
+        items = directory / 'items.jsonl'
+        body = {'panel': {k: v for k, v in record.items() if k != 'report'}, 'items': panel_job.read_jsonl(items) if items.is_file() else [],
+                'grades': {j['name']: [{'itemId': k, 'vote': v} for k, v in panel_job.read_grades(directory / f"grades-{j['name']}.jsonl").items()] for j in JUDGES},
+                'report': record.get('report'), 'label': 'estimated by local models, not verified'}
+        return StreamingResponse(iter([encoded(body)]), media_type='application/json', headers={'Content-Disposition': f'attachment; filename="panel-{record["id"]}.json"'})
