@@ -311,19 +311,69 @@ def load_benchmark(revision, *, runtime_root, all_subjects=False, expected_check
     return {**manifest, "manifestChecksum": checksum}
 
 
+def _judge_manifest(runtime_root):
+    return Path(runtime_root) / "quality" / "judges.json"
+
+
+def _read_judges(runtime_root):
+    try:
+        judges = json.loads(_judge_manifest(runtime_root).read_text(encoding="utf-8"))["judges"]
+        return judges if isinstance(judges, dict) else {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def prepare_judges(runtime_root):
+    """Explicit network action: download each judge and pin its revision in the runtime manifest."""
+    from judge_panel import JUDGES
+
+    path = _judge_manifest(runtime_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    judges = _read_judges(runtime_root)
+    manifest = {"judges": judges, "preparedAt": None}
+    for judge in JUDGES:
+        prepared = prepare_model(judge["modelId"])
+        judges[judge["name"]] = {"modelId": judge["modelId"], "revision": prepared["revision"]}
+        manifest["preparedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    return manifest
+
+
+def judge_status(runtime_root):
+    """Offline readiness: ready only when the manifest revision is cached and complete."""
+    from judge_panel import JUDGES
+
+    pinned = _read_judges(runtime_root)
+    result = {}
+    for judge in JUDGES:
+        entry = pinned.get(judge["name"])
+        revision = entry.get("revision") if isinstance(entry, dict) else None
+        cached = get_model_status(judge["modelId"], revision=revision) if isinstance(revision, str) else {}
+        ready = cached.get("status") == "ready"
+        result[judge["name"]] = {"modelId": judge["modelId"], "revision": revision, "status": "ready" if ready else "missing_weights", "path": cached.get("path") if ready else None}
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     status = sub.add_parser("status")
     status.add_argument("--model", default=TAIDE_ID)
     prepare = sub.add_parser("prepare", help="Explicit download; never accepts gate/license terms")
-    prepare.add_argument("target", choices=("model", "benchmark"))
+    prepare.add_argument("target", choices=("model", "benchmark", "judges"))
     prepare.add_argument("--model", default=TAIDE_ID)
     prepare.add_argument("--revision", help="Immutable model SHA; preserves the frozen inference baseline")
     prepare.add_argument("--root", type=Path, default=BENCHMARKS)
     prepare.add_argument("--all-subjects", action="store_true", help="10 test questions from every subject")
     args = parser.parse_args()
-    result = get_model_status(args.model) if args.command == "status" else (prepare_model(args.model, revision=args.revision) if args.target == "model" else prepare_benchmark(args.root, all_subjects=args.all_subjects))
+    if args.command == "status":
+        result = get_model_status(args.model)
+    elif args.target == "judges":
+        result = prepare_judges(Path(os.environ.get("FORGETUNE_DATA_ROOT", str(Path(__file__).resolve().parent / "data"))))
+    else:
+        result = prepare_model(args.model, revision=args.revision) if args.target == "model" else prepare_benchmark(args.root, all_subjects=args.all_subjects)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

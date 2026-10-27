@@ -456,3 +456,43 @@ def test_generate_bounded_pins_requested_gpu(pilot, models, snapshot, tmp_path, 
     monkeypatch.setattr(importlib.import_module("quality_pilot"), "run_with_pilot_budget", capture)
     pilot.generate_bounded([{"id": "x", "input": "Q", "task": "mcq"}], runtime_root=tmp_path, load_mode="bnb4", gpu="GPU-b")
     assert seen["gpu"] == "GPU-b"
+
+
+def _judge_shas():
+    from judge_panel import JUDGES
+    return {j["name"]: ("abc"[i] * 40) for i, j in enumerate(JUDGES)}
+
+
+def test_judge_status_without_manifest_is_missing(models, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(importlib.import_module("quality_models"), "get_model_status", lambda *a, **kw: calls.append(kw.get("revision")) or {"status": "ready"})
+    status = models.judge_status(tmp_path)
+    assert [s["status"] for s in status.values()] == ["missing_weights"] * 3
+    assert list(status) == ["breeze", "qwen", "yi"]
+    assert None not in calls
+
+
+def test_prepare_judges_writes_manifest_then_ready(models, tmp_path, monkeypatch):
+    shas = _judge_shas()
+    by_model = {}
+    from judge_panel import JUDGES
+    for j in JUDGES:
+        by_model[j["modelId"]] = shas[j["name"]]
+    monkeypatch.setattr(importlib.import_module("quality_models"), "prepare_model", lambda model_id, **kw: {"modelId": model_id, "revision": by_model[model_id], "path": "p"})
+    monkeypatch.setattr(importlib.import_module("quality_models"), "get_model_status", lambda model_id, *, revision=None: {"status": "ready" if revision == by_model[model_id] else "missing_weights", "path": f"/c/{revision}"})
+    manifest = models.prepare_judges(tmp_path)
+    saved = json.loads((tmp_path / "quality" / "judges.json").read_text(encoding="utf-8"))
+    assert saved == manifest and set(saved["judges"]) == set(shas) and saved["preparedAt"]
+    assert {n: e["revision"] for n, e in saved["judges"].items()} == shas
+    assert not list((tmp_path / "quality").glob("*.tmp"))
+    status = models.judge_status(tmp_path)
+    assert all(s["status"] == "ready" and s["revision"] == shas[n] and s["path"] for n, s in status.items())
+
+
+def test_judge_status_missing_when_cached_revision_differs(models, tmp_path, monkeypatch):
+    shas = _judge_shas()
+    (tmp_path / "quality").mkdir()
+    (tmp_path / "quality" / "judges.json").write_text(json.dumps({"judges": {n: {"modelId": "m", "revision": r} for n, r in shas.items()}, "preparedAt": "t"}))
+    monkeypatch.setattr(importlib.import_module("quality_models"), "get_model_status", lambda model_id, *, revision=None: {"status": "missing_weights"})
+    status = models.judge_status(tmp_path)
+    assert all(s["status"] == "missing_weights" and s["revision"] == shas[n] for n, s in status.items())
