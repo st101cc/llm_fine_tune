@@ -1,6 +1,101 @@
 # ForgeTune
 
-A local-first fine-tuning studio for instruction and completion datasets. The browser runs on Windows; model training runs through a WSL2 Python service on your NVIDIA GPU.
+A local-first fine-tuning studio for instruction and completion datasets, with a
+Traditional Chinese (Taiwan) data-quality pilot built on TAIDE. The browser UI talks
+to a small Node server, which proxies to a FastAPI/LangGraph trainer running on a
+local NVIDIA GPU or on the `gcp-dev` VM.
+
+## How it runs
+
+```
+Browser ──► Node web server (server.mjs, :4173) ──► Trainer API (trainer/app.py, FastAPI + LangGraph)
+                    │                                        │
+                    └──► Compass API (optional, hosted)      ├──► local GPU ≥24 GB (:8000), or
+                                                             └──► gcp-dev VM, 2× T4 (:18000 via SSH tunnel)
+                                                                      │
+                                         runtime data: datasets, runs, adapters, quality.sqlite, GPU ledger
+```
+
+- **Web server** (`server.mjs`, `public/`, `index.html`): serves the UI and keeps API keys (Compass) server-side.
+- **Trainer** (`trainer/`): dataset import and audit, LangGraph workflow, training, evaluation, and the quality pilot.
+- **Runtime data** (`trainer/data/`, `.forge-data/`): never committed.
+
+## Quick start
+
+From the repository root on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File start-auto.ps1
+```
+
+The launcher picks a local GPU with at least 24 GB, otherwise the `gcp-dev` VM, opens the SSH
+tunnel when needed, and serves the UI at http://127.0.0.1:4173. Use `-CheckOnly` to inspect the
+target and `-SelfTest` to check GPU selection. On the VM the backend is started (or restarted, after
+stopping the running `uvicorn app:app` process) with `trainer/start-vm-backend.sh`.
+
+To run only the UI (preview mode without a trainer): `npm start`.
+
+## Two workflows
+
+| Workflow | Steps | Where |
+|---|---|---|
+| Fine-tune a model | Import data (file, GitHub, Hugging Face) → analyse and benchmark → approve and train (LoRA/QLoRA) → evaluate base vs tuned | Workspace |
+| Traditional Chinese quality | Audit for mainland terms → review into a new dataset version → compare original vs reviewed training → grade answers with the judge panel | Dataset quality, Comparisons, Judge panels |
+
+Nothing trains or uses the GPU until you approve it, and no adapter is ever deployed automatically.
+
+## Traditional Chinese quality pilot
+
+A zh-TW / TAIDE-specific pipeline (`trainer/quality_*.py`, `public/quality.js`). Operations guide:
+[docs/quality-pilot-operations.md](docs/quality-pilot-operations.md); results and limitations:
+[docs/quality-pilot-validation.md](docs/quality-pilot-validation.md).
+
+1. **Audit** a local or imported dataset (OpenCC suggestions plus an optional customer term list such as
+   `validation/taiwanchat-terms.json`). Full scans cover every row; quick samples are capped at 600.
+2. **Review** suggestions, accept or ignore them, and **create a dataset version**. Prompts, labels,
+   code, URLs and quotations stay unchanged; the original file is never modified.
+3. **Fine-tune** from that version with the **Fine-tune** button. It opens the normal fine-tune workflow
+   with the reviewed data, tagged with its provenance: local-only, TAIDE only (no substitution), and the
+   legacy judge is disabled.
+4. **Compare original vs reviewed** trains two QLoRA adapters that differ only in the accepted edits
+   (in parallel on the two T4s) and evaluates base, original-trained and reviewed-trained models on
+   listed-term usage plus a TMMLU+ smoke subset. On TaiwanChat (2026-10-22) listed mainland terms per
+   1,000 characters went 2.6 (base) → 8.3 (original-trained) → 0.4 (reviewed-trained), with no TMMLU+ change.
+5. **Judge panel** grades saved writing answers from a quality evaluation or a finished comparison.
+   Three local judges run in 4-bit, one per GPU: Breeze-7B, Qwen2.5-7B and Yi-1.5-9B. Correctness is a
+   majority vote; zh-TW language quality is Breeze's verdict. Grades are labelled as estimates, shown
+   with their coverage, and never overwrite human judgments. Comparisons send no reference answer to
+   the judges. By default 20 prompts are graded.
+
+All GPU work in the pilot charges one persistent GPU-second ledger (`quality_pilot.BUDGET_LIMIT_SECONDS`,
+currently 15,000 s) with a 1,800 s cap per run. Start buttons stay disabled, with reasons, when an
+estimate does not fit. Only one comparison or judge panel runs at a time.
+
+**Preparing the judges** is an explicit, one-time download (about 15–18 GB per model; check `df -h`
+first). Run it on the backend from the repository root with the backend's own cache settings:
+
+```bash
+FORGETUNE_DATA_ROOT=$PWD/data HF_HOME=$PWD/data/huggingface .venv/bin/python trainer/quality_models.py prepare judges
+```
+
+To grade a model trained through the Fine-tune button with the judge panel, first generate its answers
+on **Evaluations** (TAIDE with that run's adapter), then start a judge panel on that evaluation.
+
+## Tests
+
+```powershell
+python -m pytest trainer -q
+node --test test-compass.mjs
+node test/test-quality-panel.cjs
+```
+
+Python tests need the trainer dependencies; this Windows checkout has no `.venv`, so they are run on the VM
+(`.venv/bin/python -m pytest trainer -q`). Browser tests need the web server on :4173 and Playwright
+(set `PLAYWRIGHT_MODULE` when it is not installed in the project).
+
+## Feature reference
+
+The sections below document each feature and its safeguards in detail.
 
 ## What is included
 
