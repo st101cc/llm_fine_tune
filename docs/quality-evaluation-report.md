@@ -167,7 +167,9 @@ node hackathon/test-quality-ui.cjs
 
 Results: **1 streaming test passed**; browser output **Quality review and evaluation UI passed**. The browser smoke used headless Edge with mocked API responses, verified accept/version/export navigation and the evaluations page, and reported no page errors. It is not a live model or live inference test. The first browser attempt without `PLAYWRIGHT_MODULE` failed because project-local Playwright was absent; the bundled-runtime retry passed without installing dependencies.
 
-## Live check and remaining limits
+## Live check and remaining limits (2026-10-05, superseded)
+
+> Historical. Live TAIDE 4-bit runs on the T4s have since completed; see the 2026-10-14 and 2026-10-22 sections of `quality-pilot-validation.md` for measured results and current GPU-ledger figures.
 
 ```powershell
 .venv/Scripts/python.exe -B hackathon/trainer/quality_models.py status

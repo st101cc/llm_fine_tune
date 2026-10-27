@@ -54,7 +54,9 @@ Successfully prepared and verified **TMMLU+ v1.1 smoke subset**: 30 fixed questi
 
 This is a ForgeTune deterministic zero-shot protocol with strict A–D parsing, not an official leaderboard reproduction. No model answers or accuracy figures were fabricated.
 
-## Live checks and blockers
+## Live checks and blockers (2026-10-05, superseded)
+
+> Historical. Superseded by the 2026-10-14 and 2026-10-22 sections: TAIDE now runs in 4-bit on the T4s, and the GPU ledger is 15,000 s (4,274 s left after the 2026-10-22 run).
 
 | Check | Result |
 |---|---|
@@ -74,7 +76,9 @@ This is a ForgeTune deterministic zero-shot protocol with strict A–D parsing, 
 
 Preflight evidence is saved locally in `.forge-data/quality-pilot-validation-2026-10-05/summary.json`. No new compute was provisioned, unrelated workloads stopped, hosted judging invoked or alternate model silently substituted.
 
-## Deliberate limitations and remaining acceptance work
+## Deliberate limitations and remaining acceptance work (2026-10-05, partly superseded)
+
+> The live acceptance blockers below were resolved by the approved 4-bit path (see the 2026-10-14 and 2026-10-22 sections). The scope limits (per-subset audits, no DeepEval/Promptfoo, judge panel, Taiwan Truthful QA or radar charts) still apply.
 
 The current FP16 runner cannot complete the live acceptance test on one available T4. Completion needs authorized cached TAIDE weights and suitable existing single-GPU memory, or a separately approved quantized execution change with its own verification. The frozen synthetic fixture tests structured extraction plumbing; its explicit correction decisions are fixture-author approvals, not invented production review records.
 

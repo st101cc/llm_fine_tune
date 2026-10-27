@@ -110,7 +110,7 @@ Training writes normal run records under `<root>/runs/<id>/` and runs `train.py`
    - edited rows exist but none has a single-turn prompt → "no edited row has a single-turn prompt to evaluate".
    - When every `answer_text` is `None` (plain `text` rows), the only reason is "plain text rows have no prompt to evaluate; comparison needs messages or prompt/completion rows".
 
-- [ ] **Step 1: Write the failing tests** in `trainer/test_comparison.py`. Use synthetic rows and `token_count` = character length. Assertions:
+- [x] **Step 1: Write the failing tests** in `trainer/test_comparison.py`. Use synthetic rows and `token_count` = character length. Assertions:
 
 ```python
 def test_split_is_deterministic_and_disjoint(): # same inputs twice -> identical dict; eval/dev/train pairwise disjoint; no input_key in two splits
@@ -128,13 +128,13 @@ def test_load_pair_rejects_missing_or_changed_source(tmp_path): # deleted source
 def test_report_counts_and_paired(): # hand-built answers: termsPer1k, answersWithTerm, paired originalOnly/reviewedOnly match hand counts; headline contains both rates
 ```
 
-- [ ] **Step 2: Run and confirm they fail.**
+- [x] **Step 2: Run and confirm they fail.**
   `.venv/bin/python -m pytest trainer/test_comparison.py -q`. Expected: ImportError / failures.
-- [ ] **Step 3: Implement `trainer/comparison.py`** per the Interfaces block.
+- [x] **Step 3: Implement `trainer/comparison.py`** per the Interfaces block.
   - `load_pair` uses `store.get("version", id)`, `store.get("audit", version["provenance"]["auditId"])`, `store.source_path(audit["dataset"])`, `store.export_path(id)` and `quality_store.fingerprint`.
-- [ ] **Step 4: Point `taiwanchat_experiment.py` and its test at the shared functions.**
+- [x] **Step 4: Point `taiwanchat_experiment.py` and its test at the shared functions.**
   Run `.venv/bin/python -m pytest trainer/test_comparison.py trainer/test_taiwanchat_experiment.py -q`. Expected: all pass.
-- [ ] **Step 5: Commit** `trainer/comparison.py trainer/test_comparison.py trainer/taiwanchat_experiment.py trainer/test_taiwanchat_experiment.py`. Message: "Add shared comparison core: split, estimate, files, metric, report".
+- [x] **Step 5: Commit** `trainer/comparison.py trainer/test_comparison.py trainer/taiwanchat_experiment.py trainer/test_taiwanchat_experiment.py`. Message: "Add shared comparison core: split, estimate, files, metric, report".
 
 ### Task 2: GPU plumbing and managed runs
 
@@ -149,15 +149,15 @@ def test_report_counts_and_paired(): # hand-built answers: termsPer1k, answersWi
   - `generate_bounded(..., gpu=None)`: forwards `gpu` to `run_with_pilot_budget`.
   - `POST /runs/{id}/cancel` → `409 {"detail": "This run is managed by comparison <id>; cancel the comparison instead."}` when `run.json` has `managedBy`.
 
-- [ ] **Step 1: Write failing tests.**
+- [x] **Step 1: Write failing tests.**
   - `test_idle_gpus_lists_only_idle_large_enough`: mock `subprocess.check_output` with two GPUs, one with a compute pid. Assert only the idle UUID is returned.
   - `test_generate_bounded_pins_requested_gpu`: monkeypatch `run_with_pilot_budget` to capture kwargs. Assert `gpu == "GPU-b"`.
   - `test_quality_qlora_training_requests_bnb4_admission`: follow the setup in `trainer/test_quality_training.py`. Capture `run_with_pilot_budget` kwargs; assert `load_mode == "bnb4"`.
   - `test_cancel_managed_run_returns_409`: write `run.json` with `managedBy`; POST cancel; assert 409 and the detail contains "comparison".
-- [ ] **Step 2: Run them and confirm they fail.**
-- [ ] **Step 3: Implement the three changes.**
-- [ ] **Step 4: Run** `trainer/test_quality_models.py trainer/test_quality_training.py trainer/test_taide_bnb4.py`. Expected: pass.
-- [ ] **Step 5: Commit.** Message: "Pin GPUs for bounded generation, admit QLoRA quality runs in 4-bit, protect managed runs".
+- [x] **Step 2: Run them and confirm they fail.**
+- [x] **Step 3: Implement the three changes.**
+- [x] **Step 4: Run** `trainer/test_quality_models.py trainer/test_quality_training.py trainer/test_taide_bnb4.py`. Expected: pass.
+- [x] **Step 5: Commit.** Message: "Pin GPUs for bounded generation, admit QLoRA quality runs in 4-bit, protect managed runs".
 
 ### Task 3: Comparison job runner (`comparison_job.py`)
 
@@ -195,7 +195,7 @@ def test_report_counts_and_paired(): # hand-built answers: termsPer1k, answersWi
 5. A failed step marks the comparison `failed` with that step's message. No later step runs.
 6. Completion: `status = complete`; `report` = `build_report(...)` output plus the run IDs.
 
-- [ ] **Step 1: Write failing tests** in `trainer/test_comparison_job.py`. Use a real `QualityStore(tmp_path)` with a small audited and versioned dataset (setup pattern: `trainer/test_quality_store.py::setup` plus `accept_customer_terms`), fake `gpus`/`train`/`generate`, and `token_count=len`. Tests:
+- [x] **Step 1: Write failing tests** in `trainer/test_comparison_job.py`. Use a real `QualityStore(tmp_path)` with a small audited and versioned dataset (setup pattern: `trainer/test_quality_store.py::setup` plus `accept_customer_terms`), fake `gpus`/`train`/`generate`, and `token_count=len`. Tests:
   - `test_happy_path_parallel_training_on_distinct_gpus`: fake `train` records `(gpu, start, end)`; assert the two intervals overlap and the GPUs differ; status `complete`; report has three models.
   - `test_single_gpu_runs_sequentially`
   - `test_managed_runs_are_normal_run_records`: both `run.json` exist with `managedBy`, `variant`, `status: complete`, `metrics.eval_loss`.
@@ -203,12 +203,12 @@ def test_report_counts_and_paired(): # hand-built answers: termsPer1k, answersWi
   - `test_cancel_vs_shutdown`: status `cancelling` + stop → `cancelled`; stop alone → still `running`.
   - `test_step_failure_stops_job`: `train` returns `{"status": "unavailable", "message": "gpu_busy ..."}` → `failed`, the evaluate steps are still `pending`.
   - `test_ledger_shortfall_fails_step_before_launch`: monkeypatch `budget_status` low; assert `train` was never called and the message mentions "GPU ledger".
-- [ ] **Step 2: Run them and confirm they fail.**
-- [ ] **Step 3: Implement `comparison_job.py`.**
+- [x] **Step 2: Run them and confirm they fail.**
+- [x] **Step 3: Implement `comparison_job.py`.**
   - Persist the record with `store.put("comparison", record)` after every state change.
   - Run parallel steps with `concurrent.futures.ThreadPoolExecutor(max_workers=2)` inside the job thread.
-- [ ] **Step 4: Run** `trainer/test_comparison_job.py trainer/test_comparison.py`. Expected: pass.
-- [ ] **Step 5: Commit.** Message: "Add resumable comparison job runner with parallel T4 steps".
+- [x] **Step 4: Run** `trainer/test_comparison_job.py trainer/test_comparison.py`. Expected: pass.
+- [x] **Step 5: Commit.** Message: "Add resumable comparison job runner with parallel T4 steps".
 
 ### Task 4: API routes and restart behaviour
 
@@ -234,21 +234,21 @@ def test_report_counts_and_paired(): # hand-built answers: termsPer1k, answersWi
     - `POST /quality/comparisons/{id}/cancel` → sets status `cancelling`, then the event
     - `GET /quality/comparisons/{id}/export` → JSON attachment `comparison-<id>.json` with the record, split manifest, all answers and the report
 
-- [ ] **Step 1: Write failing tests.**
+- [x] **Step 1: Write failing tests.**
   - `test_recover_leaves_comparisons_resumable` (store): a `running` comparison stays `running` after `recover()`; an audit still becomes `interrupted`.
   - `test_estimate_and_bounds` (api): 422 for `epochs: 4` and for `trainRows: 50`; estimate on a too-small version returns `feasible: false` with reasons.
   - `test_create_conflict_and_cancel`: monkeypatch `comparison_job.run_comparison` with a blocking fake; second POST → 409; cancel → record status `cancelling`, then `cancelled`.
   - `test_startup_resumes_running_comparison`: put a `running` record, build the app, assert the fake `run_comparison` was called with that id.
   - `test_missing_source_is_422_not_503`.
-- [ ] **Step 2: Run them and confirm they fail.**
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run them and confirm they fail.**
+- [x] **Step 3: Implement.**
   - Each comparison runs in a `threading.Thread(daemon=True, name="comparison-<id>")` tracked in a dict under the existing `lock`.
   - The startup hook resumes `queued`/`running` comparisons.
   - The shutdown hook sets their events without changing status.
   - The estimate uses the default TAIDE `token_count` from `comparison_job`, monkeypatched in tests.
-- [ ] **Step 4: Run the full suite** `.venv/bin/python -m pytest trainer -q`. Expected: only the 3 known HF-import failures.
-- [ ] **Step 5: Restart the VM backend.** Then `curl -s -X POST localhost:18000/quality/comparisons/estimate -H 'content-type: application/json' -d '{"versionId":"<the ui-term-list-test version id>"}'`. Expected: `feasible: false`, with reasons about the 4-row size.
-- [ ] **Step 6: Commit.** Message: "Add /quality/comparisons API with resume across restarts".
+- [x] **Step 4: Run the full suite** `.venv/bin/python -m pytest trainer -q`. Expected: only the 3 known HF-import failures (since fixed: `trainer/conftest.py` now isolates HF caches, so the suite is fully green).
+- [x] **Step 5: Restart the VM backend.** Then `curl -s -X POST localhost:18000/quality/comparisons/estimate -H 'content-type: application/json' -d '{"versionId":"<the ui-term-list-test version id>"}'`. Expected: `feasible: false`, with reasons about the 4-row size.
+- [x] **Step 6: Commit.** Message: "Add /quality/comparisons API with resume across restarts".
 
 ### Task 5: UI — Comparisons tab, start, progress, result
 
@@ -274,24 +274,24 @@ Copy fixed by the spec:
 
 Highlighting: wrap each `hits[model]` term occurrence in `<mark>` after `qualityEscape`.
 
-- [ ] **Step 1: Load the `dataviz` skill** before writing the bar chart. Bars are HTML/CSS (`width: <rate/max*100>%`), with values labelled in text.
-- [ ] **Step 2: Implement the start view.**
+- [x] **Step 1: Load the `dataviz` skill** before writing the bar chart. Bars are HTML/CSS (`width: <rate/max*100>%`), with values labelled in text.
+- [x] **Step 2: Implement the start view.**
   - Debounce the estimate (400 ms) on input change.
   - Disable Start when `feasible` is false and list the reasons.
   - Show GPU-seconds, wall-clock minutes and ledger remaining.
-- [ ] **Step 3: Implement the progress view.**
+- [x] **Step 3: Implement the progress view.**
   - Step tracker with status, elapsed time and GPU-seconds.
   - Run links `#/runs/<runId>`; Cancel.
   - Poll every 3 s via `qualityTimer`.
-- [ ] **Step 4: Implement the result view**: headline, table, bars, paired counts, examples, measured box, export.
-- [ ] **Step 5: Verify in the browser** (`node server.mjs` already running at 127.0.0.1:4173 with the tunnel).
+- [x] **Step 4: Implement the result view**: headline, table, bars, paired counts, examples, measured box, export.
+- [x] **Step 5: Verify in the browser** (`node server.mjs` already running at 127.0.0.1:4173 with the tunnel).
   - The start screen for the test version shows the refusal reasons with Start disabled.
   - The list view loads.
   - Render the result view by intercepting `GET /api/quality/comparisons/<id>` in-page with a record built from the TaiwanChat numbers (debug only).
   - Check the console has no errors.
   - Check 375 px width.
-- [ ] **Step 6: Run** `node --check public/quality.js public/app.js`, `node test/test-methods-page.cjs` and `node test/test-auto-evaluator.cjs`.
-- [ ] **Step 7: Commit.** Message: "Add Comparisons UI: start with live estimate, progress, result page".
+- [x] **Step 6: Run** `node --check public/quality.js public/app.js`, `node test/test-methods-page.cjs` and `node test/test-auto-evaluator.cjs`.
+- [x] **Step 7: Commit.** Message: "Add Comparisons UI: start with live estimate, progress, result page".
 
 ### Task 6: Acceptance — corrected TaiwanChat comparison through the UI
 
@@ -300,12 +300,12 @@ Highlighting: wrap each `hits[model]` term occurrence in `<mark>` after `quality
 - Modify: `docs/quality-pilot-validation.md` (append a 2026-10-22 section with the real numbers)
 - Modify: `docs/quality-pilot-operations.md` (a short "Compare original vs reviewed" usage paragraph; also fix the stale `hackathon/` paths there)
 
-- [ ] **Step 1: Generate the subset on the VM.**
+- [x] **Step 1: Generate the subset on the VM.**
   - 2,000 single-turn `messages` rows from `yentinglin/TaiwanChat@d766aa2…`, seed 42, full tokens ≤ 480. Reuse `taiwanchat_experiment` loading.
   - Upload it through the UI's Dataset quality upload.
-- [ ] **Step 2: In the UI, audit it with the full term list** from `validation/taiwanchat-terms.json` (including 大數據→巨量資料). Then "Accept all term-list suggestions" and create the version.
-- [ ] **Step 3: Start a comparison with the defaults.**
+- [x] **Step 2: In the UI, audit it with the full term list** from `validation/taiwanchat-terms.json` (including 大數據→巨量資料). Then "Accept all term-list suggestions" and create the version.
+- [x] **Step 3: Start a comparison with the defaults.**
   - Confirm the estimate is feasible and under the ledger remaining (≈9,302 s).
   - Watch progress to `complete`.
-- [ ] **Step 4: Check the result page shows all sections.** Export the JSON. Confirm both runs appear on Training runs with `managedBy`.
-- [ ] **Step 5: Write the numbers and limitations into `docs/quality-pilot-validation.md`.** Commit and push.
+- [x] **Step 4: Check the result page shows all sections.** Export the JSON. Confirm both runs appear on Training runs with `managedBy`.
+- [x] **Step 5: Write the numbers and limitations into `docs/quality-pilot-validation.md`.** Commit and push.
