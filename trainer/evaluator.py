@@ -24,6 +24,7 @@ Use the task rubric. Pass only a fully correct, sufficiently complete answer. Fa
 wrong or incomplete answer. Abstain when the question/reference is ambiguous, supporting evidence
 is insufficient, or you cannot verify correctness. Model identity is intentionally hidden.
 Return ONLY one JSON object with verdict (pass, fail or abstain) and a short nonempty reason."""
+OVERLONG = json.dumps({"verdict": "abstain", "reason": "Question, reference and answer exceed the judge's 4096-token window; nothing was truncated."})
 
 
 def rubric_for(row, question, fallback="assistant"):
@@ -50,8 +51,9 @@ def comparable_evidence(left, right):
 
 class LocalJudge:
     """One lazily loaded, cached judge per scoring batch; no hosted API calls."""
-    def __init__(self, model_id):
-        self.model_id, self.model, self.tokenizer = model_id, None, None
+    def __init__(self, model_id, *, system=SYSTEM, revision=None, overlong=OVERLONG):
+        self.model_id, self.system, self.revision, self.overlong = model_id, system, revision, overlong
+        self.model = self.tokenizer = None
 
     def __call__(self, payload):
         import torch
@@ -59,16 +61,16 @@ class LocalJudge:
             raise RuntimeError("Automatic grading needs a CUDA GPU on the backend.")
         if self.model is None:
             from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, local_files_only=True)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, revision=self.revision, local_files_only=True)
             device = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[0])
-            self.model = AutoModelForCausalLM.from_pretrained(self.model_id, local_files_only=True,
+            self.model = AutoModelForCausalLM.from_pretrained(self.model_id, revision=self.revision, local_files_only=True,
                 quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16),
                 device_map={"": device}, torch_dtype=torch.float16)
             self.model.eval()
-        prompt = self.tokenizer.apply_chat_template([{"role": "system", "content": SYSTEM}, {"role": "user", "content": payload}], tokenize=False, add_generation_prompt=True)
+        prompt = self.tokenizer.apply_chat_template([{"role": "system", "content": self.system}, {"role": "user", "content": payload}], tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
         if inputs["input_ids"].shape[1] > 4096:
-            return json.dumps({"verdict": "abstain", "reason": "Question, reference and answer exceed the judge's 4096-token window; nothing was truncated."})
+            return self.overlong
         inputs = inputs.to(self.model.device)
         with torch.inference_mode():
             output = self.model.generate(**inputs, max_new_tokens=256, do_sample=False, pad_token_id=self.tokenizer.eos_token_id)

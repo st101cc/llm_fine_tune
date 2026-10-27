@@ -201,6 +201,32 @@ def generate_bounded(cases, *, runtime_root, model_id=TAIDE_ID, adapter_path=Non
     return response(generated["status"], generated["message"], **{key: value for key, value in generated.items() if key not in ("status", "message")}, run=run)
 
 
+def judge_bounded(items, *, runtime_root, judge, grades_path, reference_mode, cancelled=lambda: False, max_seconds=1800, gpu=None):
+    """One judge, one owned subprocess, shared GPU-second ledger; appends to grades_path so chunks resume."""
+    from quality_models import judge_status
+    if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or not 0 < max_seconds <= 1800:
+        raise ValueError("max_seconds must be > 0 and <= 1800")
+    root = _runtime_directory(runtime_root)
+    grades_path = Path(grades_path).resolve()
+    if not grades_path.is_relative_to(root):
+        raise ValueError("Grades path escapes runtime area")
+    def count():
+        return sum(1 for line in grades_path.read_text(encoding="utf-8").splitlines() if line) if grades_path.is_file() else 0
+    status = judge_status(runtime_root)[judge]
+    if status["status"] != "ready":
+        return {"status": "unavailable", "reason": "missing_weights", "graded": count(), "run": None, "budget": budget_status(runtime_root)}
+    directory = root / "judging" / str(uuid.uuid4())
+    directory.mkdir(parents=True)
+    request = {"judge": judge, "modelId": status["modelId"], "revision": status["revision"], "items": list(items), "referenceMode": reference_mode, "gradesPath": str(grades_path)}
+    (directory / "request.json").write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+    command = [sys.executable, "-B", str(Path(__file__).resolve()), "--output", str(directory), "--model", status["modelId"], "--revision", status["revision"], "--worker", "judge"]
+    run = run_with_pilot_budget(runtime_root, [command], gpu=gpu, max_seconds=max_seconds, cancelled=cancelled, log_dir=directory, load_mode="bnb4")
+    result = {"status": run["status"], "graded": count(), "run": run, "budget": run["budget"]}
+    if run["status"] != "complete":
+        result.update(message=run.get("message"), reason=run.get("reason"))
+    return result
+
+
 def training_parameters():
     return {"max_steps": 8, "rank": 8, "alpha": 16, "learning_rate": 0.0001, "max_sequence_length": 512, "seed": 42, "batch_size": 1, "gradient_accumulation_steps": 1}
 
@@ -481,6 +507,16 @@ def _worker(output, model_id, phase, revision):
         temporary.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         temporary.replace(output / "answers.json")
         return
+    if phase == "judge":
+        import judge_panel
+        from evaluator import LocalJudge
+        request = json.loads((output / "request.json").read_text(encoding="utf-8"))
+        judge = LocalJudge(request["modelId"], system=judge_panel.SYSTEM, revision=request["revision"], overlong=judge_panel.OVERLONG)
+        try:
+            judge_panel.grade_items(request["items"], judge, Path(request["gradesPath"]), request["referenceMode"])
+        finally:
+            judge.close()
+        return
     if phase.startswith("train-"):
         _train_worker(output, model_id, phase.removeprefix("train-"), revision)
         return
@@ -537,7 +573,7 @@ def main():
     parser.add_argument("--seconds", type=float, default=1800)
     parser.add_argument("--benchmark", help="Prepared immutable benchmark SHA, evaluated only")
     parser.add_argument("--policy", type=Path, help="Policy JSON for optional final evaluation")
-    parser.add_argument("--worker", choices=("generate", "evaluate-base", "train-original", "evaluate-original", "train-cleaned", "evaluate-cleaned"), help=argparse.SUPPRESS)
+    parser.add_argument("--worker", choices=("generate", "judge", "evaluate-base", "train-original", "evaluate-original", "train-cleaned", "evaluate-cleaned"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
         if not args.revision:

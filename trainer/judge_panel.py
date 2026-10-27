@@ -126,6 +126,30 @@ def parse_panel_grade(raw):
     data = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip()))
     return {"correctness": _part(data, "correctness"), "language": _part(data, "language")}
 
+OVERLONG = json.dumps({part: {"verdict": "abstain", "reason": "Question, reference and answer exceed the judge's 4096-token window; nothing was truncated."} for part in ("correctness", "language")})
+
+
+def grade_items(items, call, out_path, reference_mode, cancelled=lambda: False):
+    """Append one {"itemId", "vote"} line per ungraded item, resuming from out_path. Failures of call() propagate."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    done = {json.loads(line)["itemId"] for line in out_path.read_text(encoding="utf-8").splitlines() if line} if out_path.is_file() else set()
+    graded = 0
+    with out_path.open("a", encoding="utf-8") as out:
+        for item in items:
+            if item["itemId"] in done:
+                continue
+            if cancelled():
+                break
+            raw = call(payload(item, reference_mode))
+            try:
+                vote = parse_panel_grade(raw)
+            except ValueError:
+                vote = {"error": "invalid_output"}
+            out.write(json.dumps({"itemId": item["itemId"], "vote": vote}, ensure_ascii=False) + "\n")
+            out.flush()
+            graded += 1
+    return graded
+
 
 def _label(vote, key):
     return "error" if "error" in vote else vote[key]["verdict"]
