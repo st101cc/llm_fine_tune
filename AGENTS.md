@@ -30,7 +30,7 @@ Use 2-space indentation in JavaScript and 4 spaces in Python. Keep the existing 
 
 ## Testing Guidelines
 
-Add Python tests beside the code in `trainer/test_*.py`. Use pytest and temporary directories/mocks for filesystem, model, and workflow boundaries. Add Node tests as `test/test-*.cjs`. Run the narrowest relevant test first, then the full trainer suite before submitting.
+Test files and historical reports, specs and plans are git-ignored: they live in local checkouts only and are not published (see `.gitignore`). Add Python tests beside the code in `trainer/test_*.py`. Use pytest and temporary directories/mocks for filesystem, model, and workflow boundaries. Add Node tests as `test/test-*.cjs`. Run the narrowest relevant test first, then the full trainer suite before submitting.
 
 ## Commits and Pull Requests
 

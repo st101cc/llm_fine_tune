@@ -47,8 +47,7 @@ Nothing trains or uses the GPU until you approve it, and no adapter is ever depl
 ## Traditional Chinese quality pilot
 
 A zh-TW / TAIDE-specific pipeline (`trainer/quality_*.py`, `public/quality.js`). Operations guide:
-[docs/quality-pilot-operations.md](docs/quality-pilot-operations.md); results and limitations:
-[docs/quality-pilot-validation.md](docs/quality-pilot-validation.md).
+[docs/quality-pilot-operations.md](docs/quality-pilot-operations.md).
 
 1. **Audit** a local or imported dataset (OpenCC suggestions plus an optional customer term list such as
    `validation/taiwanchat-terms.json`). Full scans cover every row; quick samples are capped at 600.
@@ -88,6 +87,10 @@ python -m pytest trainer -q
 node --test test-compass.mjs
 node test/test-quality-panel.cjs
 ```
+
+Test files (`test/`, `test-*.mjs`, `trainer/test_*.py`, `trainer/conftest.py`) are kept in local
+checkouts and are not published to this repository; the commands here and in the feature sections
+below assume a checkout that has them.
 
 Python tests need the trainer dependencies; this Windows checkout has no `.venv`, so they are run on the VM
 (`.venv/bin/python -m pytest trainer -q`). Browser tests need the web server on :4173 and Playwright
@@ -326,9 +329,9 @@ Local mode requires CUDA-enabled PyTorch in `.venv`. VM mode requires a Python 3
 
 ### Advisor API configuration and quality validation
 
-The backend loads `trainer/.env`, then `.env` in its startup directory without overriding existing variables. Copy `trainer/.env.example` there and fill in `ADVISOR_BASE_URL`, `ADVISOR_API_KEY`, and `ADVISOR_MODEL` for an OpenAI-compatible endpoint. The advisor hook assists dataset analysis. The separate Compass controls described below run external model comparisons from the workflow page. `GET /advisor/status` reports whether all three values are present. Use the exact variable names in the example. The corrected root `.env` successfully listed 261 Compass model IDs. A separate approved benchmark completed nine gpt-4.1-mini answers and eight Qwen2.5-32B-Instruct answers; the last Qwen question remained rate-limited. See `training-rag-validation-2026-09-10.md` for results and limitations. This does not configure the VM advisor automatically.
+The backend loads `trainer/.env`, then `.env` in its startup directory without overriding existing variables. Copy `trainer/.env.example` there and fill in `ADVISOR_BASE_URL`, `ADVISOR_API_KEY`, and `ADVISOR_MODEL` for an OpenAI-compatible endpoint. The advisor hook assists dataset analysis. The separate Compass controls described below run external model comparisons from the workflow page. `GET /advisor/status` reports whether all three values are present. Use the exact variable names in the example. The corrected root `.env` successfully listed 261 Compass model IDs. A separate approved benchmark completed nine gpt-4.1-mini answers and eight Qwen2.5-32B-Instruct answers; the last Qwen question remained rate-limited. This does not configure the VM advisor automatically.
 
-See [actual training and quality validation](training-rag-validation-2026-09-10.md) for the three sample datasets, training artifacts, prompt/RAG comparisons, and limitations. The tested trainer uses TRL 0.22 and Transformers 4.x.
+The tested trainer uses TRL 0.22 and Transformers 4.x.
 
 
 ## Integrated Nemotron workflow

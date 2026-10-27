@@ -25,3 +25,17 @@ htmlcov/
 # Operating-system metadata
 .DS_Store
 Thumbs.db
+
+# Tests are kept locally and not published
+/test/
+/test-*.mjs
+/trainer/test_*.py
+/trainer/conftest.py
+
+# Historical reports, specs and plans are kept locally and not published
+/*-validation-2026-*.md
+/docs/quality-pilot-progress.md
+/docs/quality-evaluation-report.md
+/docs/quality-pilot-validation.md
+/docs/superpowers/
+/trainer/TAIDE_T4_BASELINE.md
