@@ -272,7 +272,8 @@ function pollWorkflow(id) {
       const response = await fetch("/api/workflow/runs/" + id);
       if (!response.ok) return;
       const workflow = await response.json();
-      if (route() === "workflow/" + id) renderWorkflow(workflow);
+      // Rebuilding unchanged data collapses open sections and moves the scroll position.
+      if (route() === "workflow/" + id && JSON.stringify(workflow) !== JSON.stringify(window.currentWorkflow)) renderWorkflow(workflow);
       if (["waiting", "complete", "blocked", "cancelled", "failed"].includes(workflow.status)) {
         clearInterval(interval); workflowPollers.delete(id);
       }
