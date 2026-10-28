@@ -747,15 +747,25 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         results=[]
         if not ids:
             return {"status":"blocked","errors":["No development questions are available for model selection."]}
-        async with services.gpu_lock:
-            for candidate in state["candidates"]:
-                try:
-                    records=await run_inference(baseline_compare,dataset,[candidate],len(ids),eval_indices=ids,task=state["profile"]["classification"]["task"],instruction=INSTRUCTION,max_new_tokens=MAX_TOKENS,strict_context=True)
-                    record=records[0]
-                except Exception as error:
-                    record={"status":"unavailable","message":str(error)[:300]}
-                results.append({**record,"modelId":candidate["model"]["id"],"provider":"local"})
-        results = await grade_results(state, dataset, results, INSTRUCTION)
+        # The graph saves state only when this node returns, so the page reads this file for live progress.
+        progress_path=services.data_root/"workflows"/state["workflow_id"]/"progress.json"
+        def report(message):
+            try: _persist_json(progress_path,{"message":message,"startedAt":time.time()})
+            except OSError: pass  # Progress is best effort; it must never fail the benchmark.
+        try:
+            async with services.gpu_lock:
+                for index,candidate in enumerate(state["candidates"],1):
+                    report(f"Answering with {candidate['model']['id']} · model {index} of {len(state['candidates'])} · {len(ids)} questions")
+                    try:
+                        records=await run_inference(baseline_compare,dataset,[candidate],len(ids),eval_indices=ids,task=state["profile"]["classification"]["task"],instruction=INSTRUCTION,max_new_tokens=MAX_TOKENS,strict_context=True)
+                        record=records[0]
+                    except Exception as error:
+                        record={"status":"unavailable","message":str(error)[:300]}
+                    results.append({**record,"modelId":candidate["model"]["id"],"provider":"local"})
+            report(f"Grading the answers with {state.get('evaluator_model') or DEFAULT_MODEL}")
+            results = await grade_results(state, dataset, results, INSTRUCTION)
+        finally:
+            progress_path.unlink(missing_ok=True)
         results,prices=apply_review(results,{},state.get("benchmark_prices",{}))
         summary=select_model(results,ids)
         summary["accuracyReview"] = accuracy_agent_review(results)

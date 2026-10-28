@@ -767,9 +767,14 @@ async def list_workflows() -> list[dict]:
 async def get_workflow(workflow_id: str) -> dict:
     record = read_workflow(workflow_id)
     state = record.get("state", {})
+    progress = None
     if workflow_id in active_workflows:
         snapshot = await workflow_graph.aget_state({"configurable":{"thread_id":workflow_id}})
         state = {**state, **getattr(snapshot, "values", {})}
+        try:
+            progress = json.loads((WORKFLOWS_ROOT / workflow_id / "progress.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass  # No step is reporting progress, or it is mid-write.
     training_records = []
     for path in RUNS_ROOT.glob("*/run.json"):
         run = json.loads(path.read_text(encoding="utf-8"))
@@ -778,7 +783,7 @@ async def get_workflow(workflow_id: str) -> dict:
             if context_path.exists():
                 run["trainingContext"] = json.loads(context_path.read_text(encoding="utf-8"))
             training_records.append(run)
-    return public_workflow({**state, **record, "state":state, "trainingRecords":training_records})
+    return public_workflow({**state, **record, "state":state, "trainingRecords":training_records, "progress":progress})
 
 
 @app.get("/workflow/runs/{workflow_id}/comparison-inputs")
