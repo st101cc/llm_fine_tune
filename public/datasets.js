@@ -121,6 +121,13 @@ async function pollDatasetImport() {
   try {
     const response = await fetch("/api/datasets/imports/" + id);
     const job = await response.json();
+    // 404 means the trainer will never know this import (data reset, other backend); retrying would lock the form forever.
+    if (response.status === 404 && datasetImport?.id === id) {
+      clearDatasetImport();
+      const box = document.querySelector("#dataset-upload-error");
+      if (box) box.textContent = datasetUploadError = "That import is no longer on the trainer. Start the import again.";
+      return;
+    }
     if (!response.ok) throw new Error(typeof job.detail === "string" ? job.detail : "Could not read import status.");
     if (datasetImport?.id === id) {
       datasetImport.job = job; saveDatasetImport(); renderDatasetImport();
