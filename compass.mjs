@@ -8,7 +8,13 @@ const storage = fileURLToPath(new URL("./.forge-data/compass/", import.meta.url)
 const active = new Map();
 const endpoint = "https://compass.llm.shopee.io/compass-api/v1";
 const failure = (status, message) => Object.assign(new Error(message), {status});
-const safeError = error => String(error.message || "Compass request failed").replaceAll(process.env.ADVISOR_API_KEY || "\0", "[redacted]").slice(0, 500);
+// Windows refuses to replace a file another request is reading; retry briefly instead of failing the job.
+async function replace(from, to) {
+  for (let attempt=0;;attempt++) {
+    try {return await rename(from,to);} catch(error) {if(attempt>=9 || !["EPERM","EACCES","EBUSY"].includes(error.code)) throw error; await delay(20);}
+  }
+}
+const safeError = error =>String(error.message || "Compass request failed").replaceAll(process.env.ADVISOR_API_KEY || "\0", "[redacted]").slice(0, 500);
 
 export function prepareMessages(messages) {
   if (!Array.isArray(messages) || messages.length > 100 || messages.some(m => !["system","user","assistant"].includes(m.role) || typeof m.content !== "string")) throw failure(422, "Invalid conversation input.");
@@ -64,7 +70,7 @@ export async function handleCompass(request, response, url, trainerUrl) {
     let phase=url.searchParams.get("phase") || "development";
     if (!["development","heldout"].includes(phase)) throw failure(422,"Choose development or heldout examples.");
     const path=join(storage, match[1]+"-"+phase+".json");
-    const save=async job=>{await mkdir(storage,{recursive:true});await writeFile(path+".tmp",JSON.stringify(job,null,2));await rename(path+".tmp",path);};
+    const save=async job=>{await mkdir(storage,{recursive:true});await writeFile(path+".tmp",JSON.stringify(job,null,2));await replace(path+".tmp",path);};
     if(request.method==="GET") {
       const job=await readJob(path);
       if(job?.status==="running" && !active.has(path)) job.status="interrupted";
