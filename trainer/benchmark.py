@@ -59,8 +59,9 @@ def apply_review(results, response, prices):
         if r.get("provider")=="local":
             r["costUsd"]=r["inferenceSeconds"]*hourly/3600 if hourly is not None and number(r.get("inferenceSeconds")) else None
         else:
-            r["costUsd"]=None
-            if r["modelId"] in rates:
+            # Compass bills each answer (usage.price_cost, USD); a charge it reported beats typed-in token prices.
+            r["costUsd"]=(r.get("usage") or {}).get("price_cost")
+            if r["costUsd"] is None and r["modelId"] in rates:
                 usage=r.get("usage") or {};rate=rates[r["modelId"]]
                 r["costUsd"]=(usage["prompt_tokens"]*rate["input"]+usage["completion_tokens"]*rate["output"])/1_000_000 if all(number(usage.get(k)) for k in ("prompt_tokens","completion_tokens")) else None
         if r["modelId"] in grades:
@@ -98,6 +99,6 @@ def compass_results(job, benchmark, rows):
         outputs=[r for r in job.get("results",[]) if r.get("model")==model]
         if [r.get("rowId") for r in outputs]!=ids or any(not isinstance(r.get("output"),str) or not r["output"].strip() or len(r["output"])>20000 or not number(r.get("seconds")) or r["seconds"]<0 for r in outputs):
             raise ValueError("Each Compass model must finish every benchmark question with timing data.")
-        usage={k:sum(r["usage"][k] for r in outputs) if all(number((r.get("usage") or {}).get(k)) and r["usage"][k]>=0 for r in outputs) else None for k in ("prompt_tokens","completion_tokens")}
+        usage={k:sum(r["usage"][k] for r in outputs) if all(number((r.get("usage") or {}).get(k)) and r["usage"][k]>=0 for r in outputs) else None for k in ("prompt_tokens","completion_tokens","price_cost")}
         results.append({**task_quality(rows,references,[r["output"] for r in outputs],ids),"modelId":model,"provider":"compass","status":"complete","evaluationIds":ids,"meanLatencySeconds":sum(r["seconds"] for r in outputs)/len(ids),"usage":usage,"costUsd":None,"samples":[{"rowId":i,"input":cases[n]["messages"][-1]["content"],"reference":references[n],"referenceAvailable":True,"baseOutput":r["output"],"hitTokenLimit":r.get("finishReason")=="length"} for n,(i,r) in enumerate(zip(ids,outputs))]})
     return results
