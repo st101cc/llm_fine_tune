@@ -31,14 +31,29 @@ CREDENTIAL_URL = re.compile(r"https?://[^\s/@:]+:[^\s/@]+@", re.I)
 CODE = re.compile(r"```(?:python|javascript|typescript|java|cpp|sql|bash)\b|^\s*(?:def\s+\w+\s*\(|class\s+\w+[^\n]*:|from\s+[\w.]+\s+import\s|import\s+[\w.]+\s*$|(?:const|let|var)\s+\w+\s*=|function\s+\w+\s*\(|SELECT\s+.+\s+FROM\s+)", re.I | re.M)
 
 
+def normalize_columns(dataset: Dataset) -> Dataset:
+    """Map Alpaca-style instruction/input/output rows to prompt/completion.
+
+    Their `text` column repeats the whole example, answer included, so it is
+    dropped rather than used as model input.
+    """
+    columns = set(dataset.column_names)
+    if not {"instruction", "output"} <= columns or columns & {"prompt", "completion", "messages"}:
+        return dataset
+    def pair(row):
+        extra = str(row.get("input") or "").strip()
+        return {"prompt": str(row["instruction"]) + ("\n\n" + extra if extra else ""), "completion": str(row["output"])}
+    return dataset.map(pair, remove_columns=[name for name in ("instruction", "input", "output", "text") if name in columns])
+
+
 def load_source(source: str, name: str, extension: str | None = None) -> Dataset:
     if source == "huggingface":
-        return load_dataset(name, split="train")
+        return normalize_columns(load_dataset(name, split="train"))
     suffix = (extension or Path(name).suffix.lstrip(".")).lower()
     loader = {"csv": "csv", "jsonl": "json", "parquet": "parquet"}.get(suffix)
     if not loader:
         raise ValueError("Supported file types are CSV, JSONL, and Parquet.")
-    return load_dataset(loader, data_files=name, split="train")
+    return normalize_columns(load_dataset(loader, data_files=name, split="train"))
 
 
 def content_for_row(row: dict[str, Any]) -> str:

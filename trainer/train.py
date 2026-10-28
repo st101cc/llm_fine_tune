@@ -7,7 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from advisor import classification_label_field, classification_prediction, classification_report, detect_schema, input_key
+from advisor import classification_label_field, classification_prediction, classification_report, detect_schema, input_key, normalize_columns
 
 
 def training_text_dataset(dataset, tokenizer, max_length=None):
@@ -109,14 +109,15 @@ def main() -> None:
 
     hp = config["hyperparameters"]
     def load_ref(dataset_info):
+        # Normalise exactly like advisor.load_source so training sees the rows that were profiled and evaluated.
         if dataset_info["source"] == "huggingface":
-            return load_dataset(dataset_info["name"], split=dataset_info.get("split", "train"))
+            return normalize_columns(load_dataset(dataset_info["name"], split=dataset_info.get("split", "train")))
         path = dataset_info["name"]
         extension = Path(path).suffix.lower()
         loader = {".csv": "csv", ".jsonl": "json", ".parquet": "parquet"}.get(extension)
         if not loader:
             raise RuntimeError("Uploaded dataset must be CSV, JSONL, or Parquet.")
-        return load_dataset(loader, data_files=path, split="train")
+        return normalize_columns(load_dataset(loader, data_files=path, split="train"))
 
     dataset_info = config["dataset"]
     dataset = load_ref(dataset_info)
