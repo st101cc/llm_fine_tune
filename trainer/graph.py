@@ -779,19 +779,25 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
 
     async def pick_models(state: WorkflowState) -> dict[str, Any]:
         # Runs once before the pause: LangGraph re-runs an interrupted node on every resume, so Compass is asked only here.
+        # The catalog (GET /models) carries no brief or data, so it loads whenever Compass is configured; the tick box gates only the agent.
         picking = state.get("ai_model_pick", True)
-        compass, note = [], ""
-        if picking and configured():
+        memory = services.gpu_memory_gb()
+        # The full ranking, so models that do not fit are shown as excluded; the proposal helpers keep only eligible ones.
+        ranked = rank_candidates(state["profile"], state.get("goal", "balanced"), memory)
+        compass, proposal = [], None
+        note = "AI picking is off for this run." if not picking else "Compass is not configured on the trainer."
+        if configured():
+            report_progress(state, "Asking Compass which models to compare")
             try:
                 compass = await asyncio.to_thread(text_models)
+                if picking:
+                    brief = {key: state.get(key) for key in ("task_description", "success_metric", "analysis_limit")}
+                    proposal = await asyncio.to_thread(propose_models, brief, state.get("profile", {}), memory, ranked, compass)
             except CompassError as error:
-                note = f"Compass models are unavailable: {error}"
-            brief = {key: state.get(key) for key in ("task_description", "success_metric", "analysis_limit")}
-            proposal = await asyncio.to_thread(propose_models, brief, state.get("profile", {}), services.gpu_memory_gb(), state["candidates"], compass)
-            proposal = {**proposal, "note": " ".join(filter(None, [note, proposal.get("note")]))}
-        else:
-            proposal = built_in_proposal(state["candidates"], "Compass is not configured on the trainer." if picking else "AI picking is off for this run.")
-        return {"model_plan": proposal, "model_options": {"local": [c["model"]["id"] for c in state["candidates"]], "compass": compass}}
+                note = f"Compass models are unavailable: {error}; showing the built-in local ranking."
+            finally:
+                clear_progress(state)
+        return {"model_plan": proposal or built_in_proposal(ranked, note), "model_options": {"local": [c["model"]["id"] for c in state["candidates"]], "compass": compass}}
 
     async def approve_models(state: WorkflowState) -> dict[str, Any]:
         local, compass = state["model_options"]["local"], state["model_options"]["compass"]
