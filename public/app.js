@@ -342,7 +342,7 @@ function modelPlanReview(pending) {
     `<div id="model-plan-rows">${rows}</div><label>Add a Compass model<input id="compass-add" list="compass-options" autocomplete="off" placeholder="Choose from the list"></label><datalist id="compass-options">${(pending.compassOptions || []).map(id => `<option value="${escapeHtml(id)}">`).join("")}</datalist><div><button class="button" type="button" id="add-compass">Add</button></div>` +
     (excluded ? `<h3>Not suggested</h3><ul class="resolution-list">${excluded}</ul>` : "") +
     (pending.privacyFlagged ? `<div class="notice" id="model-plan-privacy">This dataset was flagged for possible private data. Approving a list with Compass models confirms you are happy to send those questions to Compass.</div>` : "") +
-    `<p id="model-plan-limit" role="status"></p><button class="button primary" id="approve-models">Approve and run</button> <button class="button" type="button" id="abort-workflow">Cancel</button></form>`;
+    `<p id="model-plan-limit" role="status"></p><button class="button primary" type="button" id="approve-models">Approve and run</button> <button class="button" type="button" id="abort-workflow">Cancel</button></form>`;
 }
 
 function bindModelPlan(workflow) {
@@ -372,10 +372,9 @@ function bindModelPlan(workflow) {
     event.preventDefault();
     form.querySelector("#add-compass").click();
   });
-  form.onsubmit = event => {
-    event.preventDefault();
-    workflowAction(workflow.id, {action:"approve", models:boxes().map(box => ({id:box.dataset.model, provider:box.dataset.provider}))}, "Models approved. Benchmarking is starting.");
-  };
+  // No submit button, so Enter (on a checkbox or anywhere) can never approve; only a click on the button does.
+  form.onsubmit = event => event.preventDefault();
+  form.querySelector("#approve-models").onclick = () => workflowAction(workflow.id, {action:"approve", models:boxes().map(box => ({id:box.dataset.model, provider:box.dataset.provider}))}, "Models approved. Benchmarking is starting.");
   sync();
 }
 
