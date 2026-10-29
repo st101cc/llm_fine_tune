@@ -28,13 +28,23 @@ def built_in_proposal(local: list[dict[str, Any]], note: str) -> dict[str, Any]:
     return {"source": "built_in", "note": note, "recommendation": f"Start with {models[0]['id']}." if models else "", "models": models, "excluded": excluded}
 
 
+def plain_facts(facts: Any) -> dict[str, Any]:
+    plain = (str, int, float, bool)
+    kept = {}
+    for key, value in (facts if isinstance(facts, dict) else {}).items():
+        if isinstance(value, plain) or (isinstance(value, dict) and all(isinstance(inner, plain) for inner in value.values())):
+            kept[key] = value
+    return kept
+
+
 def build_prompt(brief: dict[str, Any], profile: dict[str, Any], memory_gb: int, local: list[dict[str, Any]], compass: list[str]) -> str:
-    facts = {key: value for key, value in (profile.get("facts") or {}).items() if not isinstance(value, (list, dict))}
+    classification = profile.get("classification")
+    classification = {key: classification.get(key) for key in ("task", "confidence", "source")} if isinstance(classification, dict) else None
     models = [{"id": item["model"]["id"], **{key: item["model"].get(key) for key in ("sizeB", "vram", "task")}} for item in eligible(local)]
     return json.dumps({
         "task": {key: brief.get(key) for key in ("task_description", "success_metric", "analysis_limit")},
-        "classification": profile.get("classification"),
-        "facts": facts,
+        "classification": classification,
+        "facts": plain_facts(profile.get("facts")),
         "gpuMemoryGb": memory_gb,
         "localModels": models,
         "compassModels": compass,
