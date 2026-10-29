@@ -510,6 +510,19 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             return await asyncio.to_thread(isolated_inference, function, *args, **kwargs)
         return await asyncio.to_thread(function, *args, **kwargs)
 
+    # The graph saves state only when a node returns, so long steps write this file for the page's live progress.
+    def progress_path(state):
+        return services.data_root / "workflows" / state["workflow_id"] / "progress.json"
+
+    def report_progress(state, message):
+        try:
+            _persist_json(progress_path(state), {"message": message, "startedAt": time.time()})
+        except OSError:
+            pass  # Progress is best effort; it must never fail a workflow step.
+
+    def clear_progress(state):
+        progress_path(state).unlink(missing_ok=True)
+
     async def grade_results(state, dataset, results, instruction="", knowledge_documents=None):
         if state.get('quality_provenance'):
             return results  # Bounded quality inference records separate deterministic scores; no implicit judge.
@@ -747,25 +760,20 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         results=[]
         if not ids:
             return {"status":"blocked","errors":["No development questions are available for model selection."]}
-        # The graph saves state only when this node returns, so the page reads this file for live progress.
-        progress_path=services.data_root/"workflows"/state["workflow_id"]/"progress.json"
-        def report(message):
-            try: _persist_json(progress_path,{"message":message,"startedAt":time.time()})
-            except OSError: pass  # Progress is best effort; it must never fail the benchmark.
         try:
             async with services.gpu_lock:
                 for index,candidate in enumerate(state["candidates"],1):
-                    report(f"Answering with {candidate['model']['id']} · model {index} of {len(state['candidates'])} · {len(ids)} questions")
+                    report_progress(state,f"Answering with {candidate['model']['id']} · model {index} of {len(state['candidates'])} · {len(ids)} questions")
                     try:
                         records=await run_inference(baseline_compare,dataset,[candidate],len(ids),eval_indices=ids,task=state["profile"]["classification"]["task"],instruction=INSTRUCTION,max_new_tokens=MAX_TOKENS,strict_context=True)
                         record=records[0]
                     except Exception as error:
                         record={"status":"unavailable","message":str(error)[:300]}
                     results.append({**record,"modelId":candidate["model"]["id"],"provider":"local"})
-            report(f"Grading the answers with {state.get('evaluator_model') or DEFAULT_MODEL}")
+            report_progress(state,f"Grading the answers with {state.get('evaluator_model') or DEFAULT_MODEL}")
             results = await grade_results(state, dataset, results, INSTRUCTION)
         finally:
-            progress_path.unlink(missing_ok=True)
+            clear_progress(state)
         results,prices=apply_review(results,{},state.get("benchmark_prices",{}))
         summary=select_model(results,ids)
         summary["accuracyReview"] = accuracy_agent_review(results)
@@ -809,12 +817,19 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         candidates = state.get("candidates", [])[: int(state.get("max_candidates", 3))]
         indices = manifest.get("developmentIndices", manifest.get("trainIndices", [])[:10])[:state.get("analysis_limit", 10)]
         instruction = state.get("prompt_instruction", "")
+        label = state.get("progress_label") or ("Prompt test" if instruction else "Baseline test")
+        models = ", ".join(c["model"]["id"] for c in candidates)
         try:
-            async with services.gpu_lock:
-                comparisons = await run_inference(baseline_compare, dataset, candidates, len(indices), eval_indices=indices, task=state.get("profile", {}).get("classification", {}).get("task"), instruction=instruction, knowledge_documents=state.get("knowledge_documents") if state.get("prompt_uses_rag") else None)
-        except Exception as error:
-            comparisons = [{"status": "unavailable", "message": str(error)[:300]}]
-        comparisons = await grade_results(state, dataset, comparisons, instruction, state.get("knowledge_documents") if state.get("prompt_uses_rag") else None)
+            report_progress(state, f"{label}: answering with {models} · {len(indices)} questions")
+            try:
+                async with services.gpu_lock:
+                    comparisons = await run_inference(baseline_compare, dataset, candidates, len(indices), eval_indices=indices, task=state.get("profile", {}).get("classification", {}).get("task"), instruction=instruction, knowledge_documents=state.get("knowledge_documents") if state.get("prompt_uses_rag") else None)
+            except Exception as error:
+                comparisons = [{"status": "unavailable", "message": str(error)[:300]}]
+            report_progress(state, f"{label}: grading the answers with {state.get('evaluator_model') or DEFAULT_MODEL}")
+            comparisons = await grade_results(state, dataset, comparisons, instruction, state.get("knowledge_documents") if state.get("prompt_uses_rag") else None)
+        finally:
+            clear_progress(state)
         trials = state.get("prompt_trials", []) + [{"instruction": instruction, "usesRag": bool(state.get("prompt_uses_rag")), "knowledgeDocuments": state.get("knowledge_documents", []) if state.get("prompt_uses_rag") else [], "results": comparisons, "developmentIds": indices}]
         return {"baseline_results": comparisons, "prompt_trials": trials, "accuracy_review": accuracy_agent_review(comparisons), "status": "awaiting_prompt_review"}
 
@@ -836,11 +851,13 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         }
         instruction = rules.get(task, "Follow the user's task and requested output format exactly. Give a direct, concise answer and do not invent missing facts.")
         # ponytail: two local prompt strategies; replace with a learned optimizer when reliable task-specific scoring exists.
-        for prompt in [instruction, instruction + " Check your answer for missing requirements and contradictions before returning the final answer. If the supplied information is insufficient, state what is missing."]:
-            result = await baseline_evaluate({**state, "prompt_trials": trials, "prompt_instruction": prompt, "prompt_uses_rag": False})
+        prompts = [instruction, instruction + " Check your answer for missing requirements and contradictions before returning the final answer. If the supplied information is insufficient, state what is missing."]
+        total = len(prompts) + bool(state.get("knowledge_documents"))
+        for number, prompt in enumerate(prompts, 1):
+            result = await baseline_evaluate({**state, "prompt_trials": trials, "prompt_instruction": prompt, "prompt_uses_rag": False, "progress_label": f"Prompt test {number} of {total}"})
             trials = result["prompt_trials"]
         if state.get("knowledge_documents"):
-            result = await baseline_evaluate({**state, "prompt_trials":trials, "prompt_instruction":instruction, "prompt_uses_rag":True})
+            result = await baseline_evaluate({**state, "prompt_trials":trials, "prompt_instruction":instruction, "prompt_uses_rag":True, "progress_label": f"Prompt test {total} of {total} (with references)"})
             trials = result["prompt_trials"]
         start = state.get("auto_trial_start", 0)
         recommendation = diagnose_trials(trials[start:])
