@@ -326,6 +326,54 @@ function workflowComparison(comparison) {
   }).join("");
 }
 
+function modelPlanRow(id, provider, reason, checked) {
+  return `<label class="check-row"><input type="checkbox" data-model="${escapeHtml(id)}" data-provider="${provider}"${checked ? " checked" : ""}><span><strong>${escapeHtml(id)}</strong> · ${provider === "compass" ? "Compass" : "Your VM"}${reason ? "<br>" + escapeHtml(reason) : ""}</span></label>`;
+}
+
+function modelPlanReview(pending) {
+  const proposal = pending.proposal || {}, chosen = proposal.models || [];
+  const proposed = new Set(chosen.map(item => item.id));
+  const rows = chosen.map(item => modelPlanRow(item.id, item.provider, item.reason, true)).join("") +
+    (pending.localOptions || []).filter(id => !proposed.has(id)).map(id => modelPlanRow(id, "local", "", false)).join("");
+  const excluded = (proposal.excluded || []).map(item => "<li><strong>" + escapeHtml(item.id) + "</strong> · " + escapeHtml(item.reason) + "</li>").join("");
+  return `<form id="model-plan" class="card body-pad experiment-form" data-compass="${escapeHtml(JSON.stringify(pending.compassOptions || []))}"><h2>Approve models to benchmark</h2><p>${escapeHtml(pending.message || "Approve or change the models to benchmark.")}</p>` +
+    (proposal.note ? `<div class="notice">${escapeHtml(proposal.note)}</div>` : "") +
+    (proposal.recommendation ? `<p>${escapeHtml(proposal.recommendation)}</p>` : "") +
+    `<div id="model-plan-rows">${rows}</div><label>Add a Compass model<input id="compass-add" list="compass-options" autocomplete="off" placeholder="Choose from the list"></label><datalist id="compass-options">${(pending.compassOptions || []).map(id => `<option value="${escapeHtml(id)}">`).join("")}</datalist><div><button class="button" type="button" id="add-compass">Add</button></div>` +
+    (excluded ? `<h3>Not suggested</h3><ul class="resolution-list">${excluded}</ul>` : "") +
+    (pending.privacyFlagged ? `<div class="notice" id="model-plan-privacy">This dataset was flagged for possible private data. Approving a list with Compass models confirms you are happy to send those questions to Compass.</div>` : "") +
+    `<p id="model-plan-limit" role="status"></p><button class="button primary" id="approve-models">Approve and run</button> <button class="button" type="button" id="abort-workflow">Cancel</button></form>`;
+}
+
+function bindModelPlan(workflow) {
+  const form = document.querySelector("#model-plan");
+  if (!form) return;
+  const boxes = () => [...form.querySelectorAll("input[data-model]")].filter(box => box.checked);
+  const sync = () => {
+    const picked = boxes(), compass = picked.filter(box => box.dataset.provider === "compass").length, local = picked.length - compass;
+    const problem = picked.length < 2 ? "Choose at least 2 models." : picked.length > 7 ? "Choose at most 7 models." : local > 4 ? "Choose at most 4 of your own models." : compass > 3 ? "Choose at most 3 Compass models." : "";
+    form.querySelector("#model-plan-limit").textContent = problem;
+    form.querySelector("#approve-models").disabled = Boolean(problem);
+    const privacy = form.querySelector("#model-plan-privacy");
+    if (privacy) privacy.style.display = compass ? "" : "none";
+  };
+  form.addEventListener("change", sync);
+  form.querySelector("#add-compass").onclick = () => {
+    const input = form.querySelector("#compass-add"), id = input.value.trim();
+    if (!JSON.parse(form.dataset.compass).includes(id)) return toast("Model not available", "Choose a Compass model from the list.");
+    const existing = [...form.querySelectorAll("input[data-model]")].find(box => box.dataset.model === id);
+    if (existing) existing.checked = true;
+    else form.querySelector("#model-plan-rows").insertAdjacentHTML("beforeend", modelPlanRow(id, "compass", "Added by you", true));
+    input.value = "";
+    sync();
+  };
+  form.onsubmit = event => {
+    event.preventDefault();
+    workflowAction(workflow.id, {action:"approve", models:boxes().map(box => ({id:box.dataset.model, provider:box.dataset.provider}))}, "Models approved. Benchmarking is starting.");
+  };
+  sync();
+}
+
 function renderWorkflow(workflow) {
   window.currentWorkflow = workflow;
   if (workflow.status === "failed" && workflow.error && !workflow.state?.split_manifest_path) {
@@ -345,7 +393,9 @@ function renderWorkflow(workflow) {
     const operations = (assessment.operations || []).map(item => "<li>" + escapeHtml(item.replaceAll("_", " ")) + "</li>").join("");
     action = "<section class='card body-pad' style='margin-top:16px'><h2>Blocker resolution review</h2><p>" + escapeHtml(pending.message || "Review the proposed data remediation.") + "</p><div class='notice dataset-error'>" + (assessment.blockers || []).map(item => escapeHtml(item.message)).join("<br>") + "</div>" + (operations ? "<h3 style='margin:16px 0 8px'>Proposed approved-only operations</h3><ul class='resolution-list'>" + operations + "</ul>" : "<p style='color:var(--muted);font-size:10px'>No safe automatic remediation is available for this blocker.</p>") + (assessment.canMaterializeAfterApproval ? "<button class='button primary' id='approve-remediation'>Approve cleanup and re-check →</button> " : "") + "<button class='button' id='replace-blocked-dataset'>Replace dataset</button> <button class='button danger' id='abort-workflow'>Abort</button></section>";
   } else if (workflow.status === "waiting" && pending?.type === "task_review") {
-    action = `<form id="task-brief" class="card body-pad experiment-form"><h2>Define the task</h2><p>State what the model should do and how you will judge success. Small evaluation sets are exploratory.</p><label>Task description<textarea name="task_description" required maxlength="2000" placeholder="Classify support tickets into billing, delivery, or account"></textarea></label><label>Success metric / rubric<textarea name="success_metric" required maxlength="2000" placeholder="Label accuracy on unseen tickets; review errors per category"></textarea></label><label>Evaluation examples per phase (up to available rows)<input name="analysis_limit" type="number" min="1" max="200" value="${pending.analysisLimit || 50}" required></label><button class="button primary">Confirm task & test models</button> <button class="button" type="button" id="abort-workflow">Cancel</button></form>`;
+    action = `<form id="task-brief" class="card body-pad experiment-form"><h2>Define the task</h2><p>State what the model should do and how you will judge success. Small evaluation sets are exploratory.</p><label>Task description<textarea name="task_description" required maxlength="2000" placeholder="Classify support tickets into billing, delivery, or account"></textarea></label><label>Success metric / rubric<textarea name="success_metric" required maxlength="2000" placeholder="Label accuracy on unseen tickets; review errors per category"></textarea></label><label>Evaluation examples per phase (up to available rows)<input name="analysis_limit" type="number" min="1" max="200" value="${pending.analysisLimit || 50}" required></label><label class="check-row"><input name="ai_model_pick" type="checkbox" checked> Let AI pick models, including Compass (sends the task brief and a data summary to Compass)</label><button class="button primary">Confirm task & test models</button> <button class="button" type="button" id="abort-workflow">Cancel</button></form>`;
+  } else if (workflow.status === "waiting" && pending?.type === "model_plan") {
+    action = modelPlanReview(pending);
   } else if (workflow.status === "waiting" && pending?.type === "data_review") {
     action = datasetClarification(pending);
   } else if (workflow.status === "waiting" && pending?.type === "prompt_review") {
@@ -366,6 +416,7 @@ function renderWorkflow(workflow) {
   app.innerHTML = shell("LangGraph workflow", workflow.status === "waiting" ? "Your review is needed." : isDone ? "Workflow results are ready." : workflow.candidate_status === "verified" ? "Evaluating your fine-tune." : "ForgeTune is working.", workflow.status === "waiting" ? "The graph is checkpointed and waiting for your decision." : "Dataset analysis, prompt experiments, and optional fine-tuning are recorded in one resumable workflow.", "<button class='button' id='back-config'>← Datasets</button> <button class='button' id='update-dataset'>Update dataset</button>") +
     steps(workflow.status === "complete" ? 3 : ["dataset_ready", "data_review", "blocker_resolution"].includes(pending?.type) ? 0 : pending?.type === "plan_approval" || Object.keys(workflow.training_runs || {}).length ? 2 : 1) + "<section class='card body-pad'><div class='section-head' style='padding:0 0 15px'><div><h2>" + escapeHtml(workflow.dataset?.displayName || workflow.state?.dataset?.displayName || "Dataset workflow") + "</h2><p>Task: " + escapeHtml(datasetTasks[workflow.profile?.classification?.task || workflow.state?.profile?.classification?.task] || "Dataset analysis") + " · Candidates: " + (workflow.approved_plan?.candidateCount || workflow.state?.max_candidates || 3) + "</p></div><span class='pill " + (workflow.status === "complete" ? "complete" : "") + "'>" + escapeHtml(workflow.status) + "</span></div><p style='color:var(--muted);font-size:11px;margin-top:12px'>" + (workflow.error ? escapeHtml(workflow.error) : workflow.status === "waiting" ? "No GPU work will start until this checkpoint is resolved." : isDone ? "All available workflow results have been persisted locally." : "The trainer will update this page automatically.") + "</p>" + (workflow.progress?.message ? "<div class='notice' role='status' style='margin-top:12px'><strong>" + escapeHtml(workflow.progress.message) + "</strong> · started " + new Date(workflow.progress.startedAt * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) + "</div>" : "") + "</section>" + action + comparison + (workflow.status === "complete" ? "<details class='card body-pad' style='margin-top:16px'><summary>Training, prompt/RAG checks & Compass models</summary>" + workflowTools(workflow) + "</details>" : workflowTools(workflow)) + "</div>";
   bindWorkflowTools(workflow);
+  bindModelPlan(workflow);
   document.querySelector("#evaluate-accuracy")?.addEventListener("click", async event => {
     event.currentTarget.disabled = true;
     try {
@@ -383,7 +434,7 @@ function renderWorkflow(workflow) {
   document.querySelector("#task-brief")?.addEventListener("submit", event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    workflowAction(workflow.id, {task_description:form.get("task_description"), success_metric:form.get("success_metric"), analysis_limit:Number(form.get("analysis_limit"))}, "Task saved. Model evaluation is starting.");
+    workflowAction(workflow.id, {task_description:form.get("task_description"), success_metric:form.get("success_metric"), analysis_limit:Number(form.get("analysis_limit")), ai_model_pick:form.get("ai_model_pick") === "on"}, "Task saved. Model evaluation is starting.");
   });
   document.querySelector("#auto-analyze")?.addEventListener("click", () => workflowAction(workflow.id, {action:"auto_analyze"}, "Testing prompts and diagnosing the next step automatically."));
   const promptForm = document.querySelector("#workflow-prompt-form");
