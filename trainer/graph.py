@@ -43,6 +43,7 @@ class WorkflowState(TypedDict, total=False):
     benchmark_selection: bool
     ai_model_pick: bool
     model_plan: dict[str, Any]
+    model_options: dict[str, list[str]]
     compass_models: list[str]
     quality_provenance: dict[str, Any] | None
     model_benchmark: dict[str, Any]
@@ -777,8 +778,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         return {**({key: value.strip() for key, value in brief.items()} if "task_description" in state else {}), "analysis_limit": limit, "ai_model_pick": pick, "candidates": eligible if state.get("benchmark_selection") else eligible[: int(state.get("max_candidates", 3))], "status": "benchmarking" if state.get("benchmark_selection") else "baseline"}
 
     async def pick_models(state: WorkflowState) -> dict[str, Any]:
-        # ponytail: LangGraph re-runs this node on every resume, so Compass is listed and asked again per answer; split the proposal into its own node if that cost matters.
-        local = [c["model"]["id"] for c in state["candidates"]]
+        # Runs once before the pause: LangGraph re-runs an interrupted node on every resume, so Compass is asked only here.
         picking = state.get("ai_model_pick", True)
         compass, note = [], ""
         if picking and configured():
@@ -791,9 +791,13 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             proposal = {**proposal, "note": " ".join(filter(None, [note, proposal.get("note")]))}
         else:
             proposal = built_in_proposal(state["candidates"], "Compass is not configured on the trainer." if picking else "AI picking is off for this run.")
+        return {"model_plan": proposal, "model_options": {"local": [c["model"]["id"] for c in state["candidates"]], "compass": compass}}
+
+    async def approve_models(state: WorkflowState) -> dict[str, Any]:
+        local, compass = state["model_options"]["local"], state["model_options"]["compass"]
         error = None
         while True:
-            response = interrupt({"type": "model_plan", "message": error or "Approve or change the models to benchmark.", "proposal": proposal, "localOptions": local, "compassOptions": compass, "privacyFlagged": (state.get("privacy_review") or {}).get("status") == "review"})
+            response = interrupt({"type": "model_plan", "message": error or "Approve or change the models to benchmark.", "proposal": state["model_plan"], "localOptions": local, "compassOptions": compass, "privacyFlagged": (state.get("privacy_review") or {}).get("status") == "review"})
             if isinstance(response, dict) and response.get("action") == "abort":
                 return {"status": "cancelled", "pending_action": None}
             models = response.get("models") if isinstance(response, dict) and response.get("action") == "approve" else None
@@ -801,7 +805,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             if error:
                 continue
             approved = {m["id"] for m in models if m["provider"] == "local"}
-            return {"candidates": [c for c in state["candidates"] if c["model"]["id"] in approved], "compass_models": [m["id"] for m in models if m["provider"] == "compass"], "model_plan": proposal, "status": "benchmarking", "pending_action": None}
+            return {"candidates": [c for c in state["candidates"] if c["model"]["id"] in approved], "compass_models": [m["id"] for m in models if m["provider"] == "compass"], "status": "benchmarking", "pending_action": None}
 
     async def benchmark_models(state: WorkflowState) -> dict[str, Any]:
         ref=state["dataset"]
@@ -1235,6 +1239,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         "clarify_data": clarify_data,
         "build_candidates": build_candidates,
         "pick_models": pick_models,
+        "approve_models": approve_models,
         "benchmark_models": benchmark_models,
         "model_selection": model_selection,
         "baseline_evaluate": baseline_evaluate,
@@ -1269,7 +1274,8 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
     builder.add_conditional_edges("human_data_review", route_after_data_review, {"load_and_normalize": "load_and_normalize", "build_candidates": "build_candidates", "dataset_ready": "dataset_ready", "finish_blocked": "finish_blocked"})
     builder.add_conditional_edges("clarify_data", route_after_clarification, {"human_data_review": "human_data_review", "build_candidates": "build_candidates"})
     builder.add_conditional_edges("build_candidates", lambda state: "finish_blocked" if not state.get("candidates") else "pick_models" if state.get("benchmark_selection") else "baseline_evaluate", {"finish_blocked": "finish_blocked", "pick_models": "pick_models", "baseline_evaluate": "baseline_evaluate"})
-    builder.add_conditional_edges("pick_models", lambda state: "finish_cancelled" if state.get("status") == "cancelled" else "benchmark_models", {"finish_cancelled": "finish_cancelled", "benchmark_models": "benchmark_models"})
+    builder.add_edge("pick_models", "approve_models")
+    builder.add_conditional_edges("approve_models", lambda state: "finish_cancelled" if state.get("status") == "cancelled" else "benchmark_models", {"finish_cancelled": "finish_cancelled", "benchmark_models": "benchmark_models"})
     builder.add_conditional_edges("dataset_ready", lambda state: "finish_cancelled" if state.get("status") == "cancelled" else "build_candidates", {"finish_cancelled": "finish_cancelled", "build_candidates": "build_candidates"})
     builder.add_conditional_edges("benchmark_models",lambda state: "finish_blocked" if state.get("status")=="blocked" else "model_selection")
     builder.add_conditional_edges("model_selection",lambda state: END if state.get("status") in {"complete","cancelled"} else "baseline_evaluate" if state.get("status")=="baseline" else "model_selection")
