@@ -833,10 +833,10 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                 try:
                     rows=[dataset[i] for i in ids]
                     cases=[{"rowId":i,"messages":[m for m in evaluation_messages(row,INSTRUCTION)[0] if not (m["role"]=="system" and not m["content"].strip())]} for i,row in zip(ids,rows)]
-                    answers=await asyncio.to_thread(answer_cases,model,cases)
+                    answers=await asyncio.to_thread(answer_cases,model,cases,max_tokens=MAX_TOKENS)
                     job={"phase":"development","status":"complete","instruction":INSTRUCTION,"maxOutputTokens":MAX_TOKENS,"splitManifestId":state["split_manifest_id"],"models":[model],"cases":cases,"results":answers}
                     results+=compass_results(job,{"developmentIds":ids,"splitManifestId":state["split_manifest_id"]},rows)
-                except (CompassError,ValueError) as error:
+                except Exception as error:  # One failing hosted model must not discard the local answers, as for local models above.
                     results.append({"status":"unavailable","message":str(error)[:300],"modelId":model,"provider":"compass"})
             report_progress(state,f"Grading the answers with {state.get('evaluator_model') or DEFAULT_MODEL}")
             results = await grade_results(state, dataset, results, INSTRUCTION)

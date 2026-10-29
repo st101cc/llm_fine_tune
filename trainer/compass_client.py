@@ -20,7 +20,7 @@ def configured() -> bool:
 
 def safe_message(message: Any) -> str:
     key = os.getenv("ADVISOR_API_KEY")
-    text = str(message or "Compass request failed")
+    text = str(message or "") or "Compass request failed"
     return (text.replace(key, "[redacted]") if key else text)[:500]
 
 
@@ -32,7 +32,7 @@ def request_compass(path: str, body: dict[str, Any] | None = None) -> dict[str, 
         request = urllib.request.Request(ENDPOINT + path, data=json.dumps(body).encode() if body is not None else None, headers=headers, method="POST" if body is not None else "GET")
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                return json.loads(response.read())
+                data = json.loads(response.read())
         except urllib.error.HTTPError as error:
             if error.code == 429 and attempt < 2:
                 time.sleep(30)
@@ -42,13 +42,17 @@ def request_compass(path: str, body: dict[str, Any] | None = None) -> dict[str, 
             except (ValueError, AttributeError, OSError):
                 message = None
             raise CompassError(safe_message(message or f"Compass returned HTTP {error.code}.")) from None
-        except (urllib.error.URLError, OSError, ValueError) as error:
+        except Exception as error:  # Any transport or parse failure (e.g. IncompleteRead) must stay a redacted CompassError.
             raise CompassError(safe_message(error)) from None
+        if not isinstance(data, dict):
+            raise CompassError("Compass returned an unexpected response.")
+        return data
     raise CompassError("Compass request failed")
 
 
 def text_models() -> list[str]:
-    ids = (item.get("id") for item in request_compass("/models").get("data", []))
+    data = request_compass("/models").get("data")
+    ids = (item.get("id") for item in (data if isinstance(data, list) else []) if isinstance(item, dict))
     return sorted(model for model in ids if isinstance(model, str) and not NON_TEXT_MODELS.search(model))
 
 
@@ -58,17 +62,19 @@ def chat(model: str, messages: list[dict[str, Any]], max_tokens: int = 256, temp
         raise CompassError("Conversation input is empty.")
     started = time.monotonic()
     data = request_compass("/chat/completions", {"model": model, "messages": kept, "temperature": temperature, "max_tokens": max_tokens})
-    choice = (data.get("choices") or [{}])[0]
-    output = (choice.get("message") or {}).get("content")
+    choices = data.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message")
+    output = message.get("content") if isinstance(message, dict) else None
     if not isinstance(output, str) or not output.strip():
         raise CompassError("Compass returned no answer text.")
     return {"output": output, "finishReason": choice.get("finish_reason"), "usage": data.get("usage") or {}, "seconds": time.monotonic() - started}
 
 
-def answer_cases(model: str, cases: list[dict[str, Any]], on_answer: Callable[[int, int], None] | None = None) -> list[dict[str, Any]]:
+def answer_cases(model: str, cases: list[dict[str, Any]], on_answer: Callable[[int, int], None] | None = None, max_tokens: int = 256) -> list[dict[str, Any]]:
     results = []
     for case in cases:
-        answer = chat(model, case["messages"])
+        answer = chat(model, case["messages"], max_tokens=max_tokens)
         results.append({"model": model, "rowId": case["rowId"], **answer})
         if on_answer:
             on_answer(len(results), len(cases))
