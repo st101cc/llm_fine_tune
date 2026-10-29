@@ -327,7 +327,7 @@ function workflowComparison(comparison) {
 }
 
 function modelPlanRow(id, provider, reason, checked) {
-  return `<label class="check-row"><input type="checkbox" data-model="${escapeHtml(id)}" data-provider="${provider}"${checked ? " checked" : ""}><span><strong>${escapeHtml(id)}</strong> · ${provider === "compass" ? "Compass" : "Your VM"}${reason ? "<br>" + escapeHtml(reason) : ""}</span></label>`;
+  return `<label class="check-row"><input type="checkbox" data-model="${escapeHtml(id)}" data-provider="${provider === "compass" ? "compass" : "local"}"${checked ? " checked" : ""}><span><strong>${escapeHtml(id)}</strong> · ${provider === "compass" ? "Compass" : "Your VM"}${reason ? "<br>" + escapeHtml(reason) : ""}</span></label>`;
 }
 
 function modelPlanReview(pending) {
@@ -367,6 +367,11 @@ function bindModelPlan(workflow) {
     input.value = "";
     sync();
   };
+  form.querySelector("#compass-add").addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    form.querySelector("#add-compass").click();
+  });
   form.onsubmit = event => {
     event.preventDefault();
     workflowAction(workflow.id, {action:"approve", models:boxes().map(box => ({id:box.dataset.model, provider:box.dataset.provider}))}, "Models approved. Benchmarking is starting.");
