@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, TypedDict
 
 from benchmark import INSTRUCTION, MAX_TOKENS, select_model, apply_review, compass_results
+from compass_client import CompassError, answer_cases, configured, text_models
 from evaluator import DEFAULT_MODEL, comparable_evidence, evaluate_results
+from model_picker import MAX_COMPASS, MAX_LOCAL, built_in_proposal, propose_models
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
@@ -27,6 +29,7 @@ from advisor import (
     cloud_assess_blockers,
     cloud_clarify,
     evaluate_tuned_run,
+    evaluation_messages,
     load_source,
     local_profile,
     input_key,
@@ -38,6 +41,9 @@ from advisor import (
 class WorkflowState(TypedDict, total=False):
     workflow_id: str
     benchmark_selection: bool
+    ai_model_pick: bool
+    model_plan: dict[str, Any]
+    compass_models: list[str]
     quality_provenance: dict[str, Any] | None
     model_benchmark: dict[str, Any]
     benchmark_prices: dict[str, Any]
@@ -332,6 +338,22 @@ def _make_split_manifest(state: WorkflowState, services: WorkflowServices, datas
     _persist_json(path, payload)
     payload["path"] = str(path)
     return payload
+
+
+def _plan_error(models: Any, local: list[str], compass: list[str]) -> str | None:
+    if not isinstance(models, list) or not all(isinstance(m, dict) for m in models):
+        return "Choose the models to benchmark."
+    for m in models:
+        if m.get("provider") not in ("local", "compass") or m.get("id") not in (local if m["provider"] == "local" else compass):
+            return f"{str(m.get('id'))[:200]} is not an available {m.get('provider')} model."
+    if len({m["id"] for m in models}) != len(models):
+        return "Approve each model only once."
+    if not 2 <= len(models) <= MAX_LOCAL + MAX_COMPASS:
+        return f"Approve between 2 and {MAX_LOCAL + MAX_COMPASS} models to compare."
+    hosted = sum(m["provider"] == "compass" for m in models)
+    if len(models) - hosted > MAX_LOCAL or hosted > MAX_COMPASS:
+        return f"Approve at most {MAX_LOCAL} local and {MAX_COMPASS} Compass models."
+    return None
 
 
 def _candidate_key(candidate: dict[str, Any]) -> str:
@@ -718,6 +740,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         # Persisted workflows predating task briefs retain their existing decisions.
         brief = {key: state.get(key, "") for key in ("task_description", "success_metric")}
         limit = state.get("analysis_limit", 50)
+        pick = state.get("ai_model_pick", True)
         while "task_description" in state and not all(isinstance(v, str) and 1 <= len(v.strip()) <= 2000 for v in brief.values()):
             response = interrupt({"type": "task_review", "message": "Define the intended task and how success will be measured before comparing models.", "analysisLimit": limit})
             if not isinstance(response, dict):
@@ -726,7 +749,8 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                 return {"status": "cancelled", "candidates": [], "pending_action": None}
             brief = {key: response.get(key, "") for key in brief}
             chosen = response.get("analysis_limit", limit)
-            if type(chosen) is not int or not 1 <= chosen <= 200:
+            pick = response.get("ai_model_pick", True)
+            if type(chosen) is not int or not 1 <= chosen <= 200 or type(pick) is not bool:
                 brief = {key: "" for key in brief}
                 continue
             limit = chosen
@@ -750,7 +774,34 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         eligible = [item for item in ranked if not item.get("rejected")]
         if not eligible:
             return {"candidates": [], "status": "blocked", "errors": ["No model is feasible for the available GPU memory."]}
-        return {**({key: value.strip() for key, value in brief.items()} if "task_description" in state else {}), "analysis_limit": limit, "candidates": eligible if state.get("benchmark_selection") else eligible[: int(state.get("max_candidates", 3))], "status": "benchmarking" if state.get("benchmark_selection") else "baseline"}
+        return {**({key: value.strip() for key, value in brief.items()} if "task_description" in state else {}), "analysis_limit": limit, "ai_model_pick": pick, "candidates": eligible if state.get("benchmark_selection") else eligible[: int(state.get("max_candidates", 3))], "status": "benchmarking" if state.get("benchmark_selection") else "baseline"}
+
+    async def pick_models(state: WorkflowState) -> dict[str, Any]:
+        # ponytail: LangGraph re-runs this node on every resume, so Compass is listed and asked again per answer; split the proposal into its own node if that cost matters.
+        local = [c["model"]["id"] for c in state["candidates"]]
+        picking = state.get("ai_model_pick", True)
+        compass, note = [], ""
+        if picking and configured():
+            try:
+                compass = await asyncio.to_thread(text_models)
+            except CompassError as error:
+                note = f"Compass models are unavailable: {error}"
+            brief = {key: state.get(key) for key in ("task_description", "success_metric", "analysis_limit")}
+            proposal = await asyncio.to_thread(propose_models, brief, state.get("profile", {}), services.gpu_memory_gb(), state["candidates"], compass)
+            proposal = {**proposal, "note": " ".join(filter(None, [note, proposal.get("note")]))}
+        else:
+            proposal = built_in_proposal(state["candidates"], "Compass is not configured on the trainer." if picking else "AI picking is off for this run.")
+        error = None
+        while True:
+            response = interrupt({"type": "model_plan", "message": error or "Approve or change the models to benchmark.", "proposal": proposal, "localOptions": local, "compassOptions": compass, "privacyFlagged": (state.get("privacy_review") or {}).get("status") == "review"})
+            if isinstance(response, dict) and response.get("action") == "abort":
+                return {"status": "cancelled", "pending_action": None}
+            models = response.get("models") if isinstance(response, dict) and response.get("action") == "approve" else None
+            error = _plan_error(models, local, compass)
+            if error:
+                continue
+            approved = {m["id"] for m in models if m["provider"] == "local"}
+            return {"candidates": [c for c in state["candidates"] if c["model"]["id"] in approved], "compass_models": [m["id"] for m in models if m["provider"] == "compass"], "model_plan": proposal, "status": "benchmarking", "pending_action": None}
 
     async def benchmark_models(state: WorkflowState) -> dict[str, Any]:
         ref=state["dataset"]
@@ -760,16 +811,29 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         results=[]
         if not ids:
             return {"status":"blocked","errors":["No development questions are available for model selection."]}
+        hosted=state.get("compass_models",[])
+        total=len(state["candidates"])+len(hosted)
         try:
             async with services.gpu_lock:
                 for index,candidate in enumerate(state["candidates"],1):
-                    report_progress(state,f"Answering with {candidate['model']['id']} · model {index} of {len(state['candidates'])} · {len(ids)} questions")
+                    report_progress(state,f"Answering with {candidate['model']['id']} · model {index} of {total} · {len(ids)} questions")
                     try:
                         records=await run_inference(baseline_compare,dataset,[candidate],len(ids),eval_indices=ids,task=state["profile"]["classification"]["task"],instruction=INSTRUCTION,max_new_tokens=MAX_TOKENS,strict_context=True)
                         record=records[0]
                     except Exception as error:
                         record={"status":"unavailable","message":str(error)[:300]}
                     results.append({**record,"modelId":candidate["model"]["id"],"provider":"local"})
+            # Hosted answers need no GPU; build cases exactly as /comparison-inputs does so compass_results accepts them.
+            for index,model in enumerate(hosted,len(state["candidates"])+1):
+                report_progress(state,f"Answering with {model} on Compass · model {index} of {total} · {len(ids)} questions")
+                try:
+                    rows=[dataset[i] for i in ids]
+                    cases=[{"rowId":i,"messages":[m for m in evaluation_messages(row,INSTRUCTION)[0] if not (m["role"]=="system" and not m["content"].strip())]} for i,row in zip(ids,rows)]
+                    answers=await asyncio.to_thread(answer_cases,model,cases)
+                    job={"phase":"development","status":"complete","instruction":INSTRUCTION,"maxOutputTokens":MAX_TOKENS,"splitManifestId":state["split_manifest_id"],"models":[model],"cases":cases,"results":answers}
+                    results+=compass_results(job,{"developmentIds":ids,"splitManifestId":state["split_manifest_id"]},rows)
+                except (CompassError,ValueError) as error:
+                    results.append({"status":"unavailable","message":str(error)[:300],"modelId":model,"provider":"compass"})
             report_progress(state,f"Grading the answers with {state.get('evaluator_model') or DEFAULT_MODEL}")
             results = await grade_results(state, dataset, results, INSTRUCTION)
         finally:
@@ -801,7 +865,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                 if any(r["provider"]=="local" and r["modelId"] in {a["modelId"] for a in added} for r in results):
                     raise ValueError("Hosted model IDs must differ from local benchmark IDs.")
                 results=[r for r in results if r["modelId"] not in {a["modelId"] for a in added}]+added
-                if len(results)>7: raise ValueError("This pilot supports five local models and two Compass models.")
+                if len(results)>9: raise ValueError("This pilot compares at most nine models: the seven planned plus two added from Compass.")
             elif response.get("action")!="select_best": raise ValueError("Choose a benchmark action.")
             results,prices=apply_review(results,response,benchmark.get("prices",{}))
             summary=select_model(results,benchmark["developmentIds"])
@@ -1170,6 +1234,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         "human_data_review": human_data_review,
         "clarify_data": clarify_data,
         "build_candidates": build_candidates,
+        "pick_models": pick_models,
         "benchmark_models": benchmark_models,
         "model_selection": model_selection,
         "baseline_evaluate": baseline_evaluate,
@@ -1203,7 +1268,8 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
     builder.add_edge("apply_blocker_remediation", "load_and_normalize")
     builder.add_conditional_edges("human_data_review", route_after_data_review, {"load_and_normalize": "load_and_normalize", "build_candidates": "build_candidates", "dataset_ready": "dataset_ready", "finish_blocked": "finish_blocked"})
     builder.add_conditional_edges("clarify_data", route_after_clarification, {"human_data_review": "human_data_review", "build_candidates": "build_candidates"})
-    builder.add_conditional_edges("build_candidates", lambda state: "finish_blocked" if not state.get("candidates") else "benchmark_models" if state.get("benchmark_selection") else "baseline_evaluate", {"finish_blocked": "finish_blocked", "benchmark_models":"benchmark_models", "baseline_evaluate": "baseline_evaluate"})
+    builder.add_conditional_edges("build_candidates", lambda state: "finish_blocked" if not state.get("candidates") else "pick_models" if state.get("benchmark_selection") else "baseline_evaluate", {"finish_blocked": "finish_blocked", "pick_models": "pick_models", "baseline_evaluate": "baseline_evaluate"})
+    builder.add_conditional_edges("pick_models", lambda state: "finish_cancelled" if state.get("status") == "cancelled" else "benchmark_models", {"finish_cancelled": "finish_cancelled", "benchmark_models": "benchmark_models"})
     builder.add_conditional_edges("dataset_ready", lambda state: "finish_cancelled" if state.get("status") == "cancelled" else "build_candidates", {"finish_cancelled": "finish_cancelled", "build_candidates": "build_candidates"})
     builder.add_conditional_edges("benchmark_models",lambda state: "finish_blocked" if state.get("status")=="blocked" else "model_selection")
     builder.add_conditional_edges("model_selection",lambda state: END if state.get("status") in {"complete","cancelled"} else "baseline_evaluate" if state.get("status")=="baseline" else "model_selection")
