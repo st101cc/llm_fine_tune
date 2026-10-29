@@ -11,7 +11,7 @@ def number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def select_model(results, ids, allow_unknown_cost=False):
+def select_model(results, ids):
     complete = [r for r in results if r.get("status") == "complete"]
     summary = {"winner":None,"status":"needs_review","results":results,"developmentIds":ids,"costUsed":False,"sampleWarning":"Fewer than 30 development examples: selection is exploratory, not statistically reliable." if len(ids) < 30 else None}
     if len(complete) < 2:
@@ -29,13 +29,11 @@ def select_model(results, ids, allow_unknown_cost=False):
     if any(not comparable_evidence(complete[0], r) for r in complete[1:]):
         return {**summary,"reason":"Models must use the same judge version and rubric."}
     known_cost = all(number(r.get("costUsd")) and r["costUsd"] >= 0 for r in complete)
-    if not known_cost and not allow_unknown_cost:
-        return {**summary,"reason":"Enter compute/token prices, or explicitly continue with cost unmeasured. Missing cost is not zero."}
     best=max(r["qualityEvidence"]["score"] for r in complete)
     # ponytail: fixed 2-point tolerance; add confidence intervals for larger benchmarks.
     contenders=[r for r in complete if r["qualityEvidence"]["score"] >= best - .02]
     winner=min(contenders,key=lambda r: (r["costUsd"] if known_cost else 0,r["meanLatencySeconds"],r["modelId"]))
-    return {**summary,"winner":winner["modelId"],"status":"selected","costUsed":known_cost,"reason":"Highest measured correctness, with cost then latency breaking ties within 2 percentage points." + (" Cost excluded for every model because at least one price is unknown." if not known_cost else " Cost uses measured usage and your configured rates, not a billing invoice.")}
+    return {**summary,"winner":winner["modelId"],"status":"selected","costUsed":known_cost,"reason":"Highest measured correctness, with cost then latency breaking ties within 2 percentage points." + (" Cost not compared: local models run on your VM and have no per-answer price." if not known_cost else " Cost uses the charges Compass reported.")}
 
 
 def apply_review(results, response, prices):

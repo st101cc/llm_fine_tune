@@ -796,7 +796,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                 if len(results)>7: raise ValueError("This pilot supports five local models and two Compass models.")
             elif response.get("action")!="select_best": raise ValueError("Choose a benchmark action.")
             results,prices=apply_review(results,response,benchmark.get("prices",{}))
-            summary=select_model(results,benchmark["developmentIds"],response.get("allowUnknownCost") is True)
+            summary=select_model(results,benchmark["developmentIds"])
             summary["accuracyReview"] = accuracy_agent_review(results)
             return {"model_benchmark":{**benchmark,**summary,"prices":prices,"error":None},"status":"awaiting_model_selection"}
         except (ValueError,TypeError,KeyError) as error:
