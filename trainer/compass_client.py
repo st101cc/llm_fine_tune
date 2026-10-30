@@ -71,6 +71,14 @@ def chat(model: str, messages: list[dict[str, Any]], max_tokens: int = 256, temp
     return {"output": output, "finishReason": choice.get("finish_reason"), "usage": data.get("usage") or {}, "seconds": time.monotonic() - started}
 
 
+
+def check_model(model: str) -> str | None:
+    try:
+        request_compass("/chat/completions", {"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 5, "temperature": 0})
+    except CompassError as error:
+        return str(error)
+    return None
+
 def answer_cases(model: str, cases: list[dict[str, Any]], on_answer: Callable[[int, int], None] | None = None, max_tokens: int = 256) -> list[dict[str, Any]]:
     results = []
     for case in cases:

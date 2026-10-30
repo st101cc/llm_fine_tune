@@ -358,14 +358,28 @@ function bindModelPlan(workflow) {
     if (privacy) privacy.style.display = compass ? "" : "none";
   };
   form.addEventListener("change", sync);
-  form.querySelector("#add-compass").onclick = () => {
-    const input = form.querySelector("#compass-add"), id = input.value.trim();
+  form.querySelector("#add-compass").onclick = async () => {
+    const input = form.querySelector("#compass-add"), add = form.querySelector("#add-compass"), id = input.value.trim();
     if (!JSON.parse(form.dataset.compass).includes(id)) return toast("Model not available", "Choose a Compass model from the list.");
     const existing = [...form.querySelectorAll("input[data-model]")].find(box => box.dataset.model === id);
-    if (existing) existing.checked = true;
-    else form.querySelector("#model-plan-rows").insertAdjacentHTML("beforeend", modelPlanRow(id, "compass", "Added by you", true));
-    input.value = "";
-    sync();
+    if (existing) { existing.checked = true; input.value = ""; return sync(); }
+    // The catalog lists models this key cannot run, so ask Compass for one short answer first.
+    add.disabled = true; add.textContent = "Checking…";
+    try {
+      const response = await fetch("/api/compass/check?model=" + encodeURIComponent(id));
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) toast("Could not check the model", result.detail || "The trainer could not reach Compass.");
+      else if (!result.ok) toast("Compass can't run this model", result.message);
+      else {
+        form.querySelector("#model-plan-rows").insertAdjacentHTML("beforeend", modelPlanRow(id, "compass", "Added by you", true));
+        input.value = "";
+        sync();
+      }
+    } catch {
+      toast("Could not check the model", "The trainer may be busy or offline.");
+    } finally {
+      add.disabled = false; add.textContent = "Add";
+    }
   };
   form.querySelector("#compass-add").addEventListener("keydown", event => {
     if (event.key !== "Enter") return;

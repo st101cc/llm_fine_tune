@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from advisor import baseline_compare, cloud_clarify, cloud_status, connection_test, load_source, local_profile, rank_candidates
 from graph import WorkflowServices, build_workflow_graph, isolated_inference, accuracy_agent_review, _compare_results
 from evaluator import DEFAULT_MODEL, evaluate_results
+import compass_client
 from langgraph.types import Command
 
 try:
@@ -391,6 +392,16 @@ async def github_dataset(request: GitHubDatasetRequest) -> dict:
 @app.get("/advisor/status")
 async def advisor_status() -> dict:
     return cloud_status()
+
+
+@app.get("/compass/check")
+async def compass_check(model: str = "") -> dict:
+    if not compass_client.configured():
+        raise HTTPException(503, "Compass is not configured. Set ADVISOR_API_KEY and the Compass ADVISOR_BASE_URL in the trainer's .env, then restart the trainer.")
+    if not model.strip() or len(model) > 200:
+        raise HTTPException(422, "Choose a Compass model ID of at most 200 characters.")
+    message = await asyncio.to_thread(compass_client.check_model, model)
+    return {"ok": message is None, "message": message or ""}
 
 
 @app.post("/advisor/connection-test")
