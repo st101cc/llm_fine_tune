@@ -15,9 +15,9 @@ INSTRUCTION = (
     'Return JSON only: {"recommendation": str, "models": [{"id": str, "provider": "local"|"compass", "reason": str}], "excluded": [{"id": str, "reason": str}]}. '
     f"Use only offered ids; at most {MAX_LOCAL} local and {MAX_COMPASS} compass models; give a short reason for each. "
     "pastResults lists earlier benchmark results for this task type: prefer models with strong past results, avoid models that failed, "
-    "and cite past results in your reasons when relevant."
+    "and cite past results in your reasons when relevant. Results from only a few questions are weak evidence."
 )
-HISTORY_KEYS = ("modelId", "provider", "runs", "scoredRuns", "meanScore", "meanCostUsd", "meanLatencySeconds", "lastDate", "lastStatus")
+HISTORY_KEYS = ("modelId", "provider", "runs", "scoredRuns", "questions", "meanScore", "meanCostUsd", "meanLatencySeconds", "lastDate", "lastStatus")
 
 
 def eligible(local: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -7,7 +7,6 @@ needed to resume a workflow after a human approval or a process restart.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import math
@@ -284,6 +283,14 @@ def _clean_uploaded_dataset(dataset: Any, profile: dict[str, Any], destination: 
     destination.parent.mkdir(parents=True, exist_ok=True)
     dataset.select(kept).to_json(str(destination))
     return {"keptRows": len(kept), "removedRows": len(dataset) - len(kept), "path": str(destination)}
+
+
+def _advisory(default: Any, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    # The model history only advises; a failed read or write must never fail a workflow step.
+    try:
+        return function(*args, **kwargs)
+    except Exception:
+        return default
 
 
 def _persist_json(path: Path, value: dict[str, Any]) -> None:
@@ -788,19 +795,18 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         compass, proposal, skipped = [], None, {}
         note = "AI picking is off for this run." if not picking else "Compass is not configured on the trainer."
         task = state["profile"]["classification"]["task"]
+        await asyncio.to_thread(_advisory, None, backfill_if_empty, services.data_root)
         if configured():
             report_progress(state, "Asking Compass which models to compare")
             try:
-                with contextlib.suppress(OSError):  # The history is advisory; it must never block picking.
-                    backfill_if_empty(services.data_root, services.data_root / "workflows")
                 # Models that definitely failed to run in the last 7 days are hidden from the agent and the add list.
                 catalog = await asyncio.to_thread(text_models)
-                recent = recently_unavailable(services.data_root)
+                recent = _advisory({}, recently_unavailable, services.data_root)
                 skipped = {model: recent[model] for model in catalog if model in recent}
                 compass = [model for model in catalog if model not in skipped]
                 if picking:
                     brief = {key: state.get(key) for key in ("task_description", "success_metric", "analysis_limit")}
-                    proposal = await asyncio.to_thread(propose_models, brief, state.get("profile", {}), memory, ranked, compass, history=summary_for(services.data_root, task))
+                    proposal = await asyncio.to_thread(propose_models, brief, state.get("profile", {}), memory, ranked, compass, history=_advisory([], summary_for, services.data_root, task))
                 if proposal and proposal["source"] == "agent":
                     # The catalog lists models this key cannot run, so check only the proposed ones.
                     report_progress(state, "Checking that the proposed Compass models respond")
@@ -814,8 +820,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                             if failure.definite:
                                 proposal["excluded"].append({"id": model["id"], "reason": f"Compass could not run it: {failure}"})
                                 compass.remove(model["id"])
-                                with contextlib.suppress(OSError):
-                                    record_check_failure(services.data_root, task, model["id"], str(failure), state["workflow_id"])
+                                _advisory(None, record_check_failure, services.data_root, task, model["id"], str(failure), state["workflow_id"])
                             else:
                                 proposal["excluded"].append({"id": model["id"], "reason": f"Compass did not respond in time: {str(failure).rstrip('.')}. You can add it back below."})
                     if left_out:
@@ -825,7 +830,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             finally:
                 clear_progress(state)
         plan = proposal or built_in_proposal(ranked, note)
-        plan["excluded"] += [{"id": model, "reason": f"Couldn't run on {past['date']:%d %b}: {past['error']} — skipped for 7 days."} for model, past in skipped.items()]
+        plan["excluded"] += [{"id": model, "reason": f"Couldn't run on {past['date']:%d %b}: {past['error'] or 'Compass refused it'} — skipped for 7 days."} for model, past in skipped.items()]
         return {"model_plan": plan, "model_options": {"local": [c["model"]["id"] for c in state["candidates"]], "compass": compass}}
 
     async def approve_models(state: WorkflowState) -> dict[str, Any]:
@@ -872,7 +877,13 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                     job={"phase":"development","status":"complete","instruction":INSTRUCTION,"maxOutputTokens":MAX_TOKENS,"splitManifestId":state["split_manifest_id"],"models":[model],"cases":cases,"results":answers}
                     results+=compass_results(job,{"developmentIds":ids,"splitManifestId":state["split_manifest_id"]},rows)
                 except Exception as error:  # One failing hosted model must not discard the local answers, as for local models above.
-                    results.append({"status":"unavailable","message":str(error)[:300],"modelId":model,"provider":"compass","unavailableDefinite":bool(getattr(error,"definite",False))})
+                    row={"status":"unavailable","message":str(error)[:300],"modelId":model,"provider":"compass","unavailableDefinite":False}
+                    # The request carried dataset text, so a 4xx may be about this dataset; only a refused dataset-free check bans the model.
+                    if getattr(error,"definite",False):
+                        check=await asyncio.to_thread(check_failure,model)
+                        if check:
+                            row.update(unavailableDefinite=check.definite,checkMessage=str(check)[:300])
+                    results.append(row)
             report_progress(state,f"Grading the answers with {state.get('evaluator_model') or DEFAULT_MODEL}")
             results = await grade_results(state, dataset, results, INSTRUCTION)
         finally:
@@ -880,10 +891,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
         results,prices=apply_review(results,{},{})
         summary=select_model(results,ids)
         summary["accuracyReview"] = accuracy_agent_review(results)
-        try:
-            record_benchmark(services.data_root,state["profile"]["classification"]["task"],results,state["workflow_id"])
-        except Exception:
-            pass  # The history is advisory; a failed write must never fail the benchmark.
+        _advisory(None,record_benchmark,services.data_root,state["profile"]["classification"]["task"],results,state["workflow_id"])
         return {"model_benchmark":{**summary,"splitManifestId":state["split_manifest_id"],"instruction":INSTRUCTION,"maxOutputTokens":MAX_TOKENS,"prices":prices},"status":"awaiting_model_selection"}
 
     async def model_selection(state: WorkflowState) -> dict[str, Any]:

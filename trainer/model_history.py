@@ -25,7 +25,8 @@ def _load(data_root: Path) -> list[dict[str, Any]]:
         entries = json.loads(history_path(data_root).read_text(encoding="utf-8")).get("entries")
     except (OSError, ValueError, AttributeError):
         return []
-    return [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+    text = (str, type(None))
+    return [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("modelId"), str) and isinstance(entry.get("provider"), text) and isinstance(entry.get("task"), text)] if isinstance(entries, list) else []
 
 
 def _save(data_root: Path, entries: list[dict[str, Any]]) -> None:
@@ -61,24 +62,27 @@ def _entry(row: dict[str, Any], task: Any, date: str, workflow_id: Any) -> dict[
     evidence = row.get("qualityEvidence") if isinstance(row.get("qualityEvidence"), dict) else {}
     status = "complete" if row.get("status") == "complete" else "unavailable"
     provider = "compass" if row.get("provider") == "compass" else "local"
-    error = row.get("message")
+    # A benchmark message can quote the dataset, so keep only the quick check's message (its request was "Reply with OK.") or a fixed text.
+    error = None if status == "complete" else row.get("checkMessage") or ("Compass refused it" if provider == "compass" else "Couldn't run it")
     return {
         "modelId": str(row.get("modelId")), "provider": provider, "task": task, "date": date, "status": status,
         "score": _number(evidence.get("score")) if evidence.get("coverage") == 1 else None, "metric": evidence.get("metric"),
         "costUsd": _number(row.get("costUsd")), "meanLatencySeconds": _number(row.get("meanLatencySeconds")),
-        "questions": len(row.get("evaluationIds") or []), "error": str(error)[:300] if error else None,
+        "questions": len(row.get("evaluationIds") or []), "error": str(error)[:300] if error is not None else None,
         "definite": provider == "compass" and status == "unavailable" and bool(row.get("unavailableDefinite")),
         "source": "benchmark", "workflowId": workflow_id,
     }
 
 
 def record_benchmark(data_root: Path, task: Any, results: list[dict[str, Any]], workflow_id: Any, when: datetime | None = None) -> None:
+    backfill_if_empty(data_root)
     date = _date(when)
     _save(data_root, _load(data_root) + [_entry(row, task, date, workflow_id) for row in results if isinstance(row, dict) and row.get("modelId")])
 
 
 def record_check_failure(data_root: Path, task: Any, model_id: str, message: Any, workflow_id: Any, when: datetime | None = None) -> None:
-    entry = _entry({"modelId": model_id, "provider": "compass", "status": "unavailable", "message": message, "unavailableDefinite": True}, task, _date(when), workflow_id)
+    backfill_if_empty(data_root)
+    entry = _entry({"modelId": model_id, "provider": "compass", "status": "unavailable", "checkMessage": str(message), "unavailableDefinite": True}, task, _date(when), workflow_id)
     _save(data_root, _load(data_root) + [{**entry, "source": "check"}])
 
 
@@ -110,7 +114,8 @@ def summary_for(data_root: Path, task: Any) -> list[dict[str, Any]]:
         last = max(entries, key=lambda entry: _parse(entry.get("date")) or datetime.min.replace(tzinfo=timezone.utc))
         scores = [entry.get("score") for entry in entries if _number(entry.get("score")) is not None]
         rows.append({
-            "modelId": model, "provider": last.get("provider"), "runs": len(entries), "scoredRuns": len(scores), "meanScore": _mean(scores),
+            "modelId": model, "provider": last.get("provider"), "runs": len(entries), "scoredRuns": len(scores),
+            "questions": sum(entry["questions"] for entry in entries if isinstance(entry.get("questions"), int)), "meanScore": _mean(scores),
             "meanCostUsd": _mean([entry.get("costUsd") for entry in entries]), "meanLatencySeconds": _mean([entry.get("meanLatencySeconds") for entry in entries]),
             "lastDate": last.get("date"), "lastStatus": last.get("status"),
         })
@@ -118,9 +123,10 @@ def summary_for(data_root: Path, task: Any) -> list[dict[str, Any]]:
     return rows[:MAX_SUMMARY]
 
 
-def backfill_if_empty(data_root: Path, workflows_root: Path) -> None:
+def backfill_if_empty(data_root: Path, workflows_root: Path | None = None) -> None:
     if history_path(data_root).exists():
         return
+    workflows_root = Path(data_root) / "workflows" if workflows_root is None else workflows_root
     entries = []
     for path in sorted(Path(workflows_root).glob("*/workflow.json")):
         try:
@@ -129,7 +135,8 @@ def backfill_if_empty(data_root: Path, workflows_root: Path) -> None:
             results = (state.get("model_benchmark") or {}).get("results") or []
             task = ((state.get("profile") or {}).get("classification") or {}).get("task")
             date = _parse(record.get("createdAt"))
-            entries += [_entry(row, task, _date(date), record.get("id") or path.parent.name) for row in results if isinstance(row, dict) and row.get("modelId")]
+            # Old rows were never confirmed by a quick check, so they never ban a model.
+            entries += [{**_entry(row, task, _date(date), record.get("id") or path.parent.name), "definite": False} for row in results if isinstance(row, dict) and row.get("modelId")]
         except (OSError, ValueError, AttributeError, TypeError):
             continue
     entries.sort(key=lambda entry: entry["date"])
