@@ -33,7 +33,7 @@ def select_model(results, ids):
     # ponytail: fixed 2-point tolerance; add confidence intervals for larger benchmarks.
     contenders=[r for r in complete if r["qualityEvidence"]["score"] >= best - .02]
     winner=min(contenders,key=lambda r: (r["costUsd"] if known_cost else 0,r["meanLatencySeconds"],r["modelId"]))
-    return {**summary,"winner":winner["modelId"],"status":"selected","costUsed":known_cost,"reason":"Highest measured correctness, with cost then latency breaking ties within 2 percentage points." + (" Cost not compared: a Compass model reported no price." if not known_cost else " Cost uses the charges Compass reported; models on your VM count as free.")}
+    return {**summary,"winner":winner["modelId"],"status":"selected","costUsed":known_cost,"reason":"Highest measured correctness, with cost then latency breaking ties within 2 percentage points." + (" Cost not compared: a Compass model reported no price." if not known_cost else " Cost uses the charges Compass reported; models on your VM count as free." if any(r.get("provider")=="compass" for r in complete) else " All models ran on your VM, so cost is free for each.")}
 
 
 def apply_review(results, response, prices):

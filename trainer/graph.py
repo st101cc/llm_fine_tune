@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, TypedDict
 
 from benchmark import INSTRUCTION, MAX_TOKENS, select_model, apply_review, compass_results
-from compass_client import CompassError, answer_cases, check_model, configured, text_models
+from compass_client import CompassError, answer_cases, check_failure, configured, text_models
 from evaluator import DEFAULT_MODEL, comparable_evidence, evaluate_results
 from model_picker import MAX_COMPASS, MAX_LOCAL, built_in_proposal, propose_models
 from langgraph.graph import END, START, StateGraph
@@ -795,12 +795,20 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                 if proposal and proposal["source"] == "agent":
                     # The catalog lists models this key cannot run, so check only the proposed ones.
                     report_progress(state, "Checking that the proposed Compass models respond")
+                    left_out = 0
                     for model in [m for m in proposal["models"] if m["provider"] == "compass"]:
-                        message = await asyncio.to_thread(check_model, model["id"])
-                        if message:
+                        failure = await asyncio.to_thread(check_failure, model["id"])
+                        if failure:
+                            left_out += 1
                             proposal["models"].remove(model)
-                            proposal["excluded"].append({"id": model["id"], "reason": f"Compass could not run it: {message}"})
-                            compass.remove(model["id"])
+                            # Only a definite refusal bans the model for this run; a temporary failure can be added back by hand.
+                            if failure.definite:
+                                proposal["excluded"].append({"id": model["id"], "reason": f"Compass could not run it: {failure}"})
+                                compass.remove(model["id"])
+                            else:
+                                proposal["excluded"].append({"id": model["id"], "reason": f"Compass did not respond in time: {str(failure).rstrip('.')}. You can add it back below."})
+                    if left_out:
+                        proposal["note"] = " ".join(filter(None, [proposal["note"], f"{left_out} proposed Compass model(s) were left out because they failed a quick check; see Not suggested."]))
             except CompassError as error:
                 note = f"Compass models are unavailable: {error}; showing the built-in local ranking."
             finally:

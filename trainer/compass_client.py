@@ -11,7 +11,14 @@ NON_TEXT_MODELS = re.compile(r"chirp|nmt|byteplus|-vl-|tts|whisper|embed|image|v
 
 
 class CompassError(Exception):
-    pass
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP status when Compass answered; None for transport failures.
+
+    @property
+    def definite(self) -> bool:
+        # A 4xx other than 429 (e.g. "model not supported", "not found or no access") will fail again; anything else may pass later.
+        return self.status is not None and 400 <= self.status < 500 and self.status != 429
 
 
 def configured() -> bool:
@@ -24,24 +31,24 @@ def safe_message(message: Any) -> str:
     return (text.replace(key, "[redacted]") if key else text)[:500]
 
 
-def request_compass(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+def request_compass(path: str, body: dict[str, Any] | None = None, *, timeout: float = 120, retries: int = 3) -> dict[str, Any]:
     if not configured():
         raise CompassError("Set ADVISOR_API_KEY and the Compass ADVISOR_BASE_URL in the trainer's .env, then restart the trainer.")
     headers = {"Authorization": "Bearer " + os.environ["ADVISOR_API_KEY"], "Content-Type": "application/json"}
-    for attempt in range(3):
+    for attempt in range(retries):
         request = urllib.request.Request(ENDPOINT + path, data=json.dumps(body).encode() if body is not None else None, headers=headers, method="POST" if body is not None else "GET")
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 data = json.loads(response.read())
         except urllib.error.HTTPError as error:
-            if error.code == 429 and attempt < 2:
+            if error.code == 429 and attempt < retries - 1:
                 time.sleep(30)
                 continue
             try:
                 message = json.loads(error.read()).get("message")
             except (ValueError, AttributeError, OSError):
                 message = None
-            raise CompassError(safe_message(message or f"Compass returned HTTP {error.code}.")) from None
+            raise CompassError(safe_message(message or f"Compass returned HTTP {error.code}."), error.code) from None
         except Exception as error:  # Any transport or parse failure (e.g. IncompleteRead) must stay a redacted CompassError.
             raise CompassError(safe_message(error)) from None
         if not isinstance(data, dict):
@@ -71,13 +78,18 @@ def chat(model: str, messages: list[dict[str, Any]], max_tokens: int = 256, temp
     return {"output": output, "finishReason": choice.get("finish_reason"), "usage": data.get("usage") or {}, "seconds": time.monotonic() - started}
 
 
+def check_failure(model: str) -> CompassError | None:
+    try:
+        request_compass("/chat/completions", {"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 5, "temperature": 0}, timeout=20, retries=1)
+    except CompassError as error:
+        return error
+    return None
+
 
 def check_model(model: str) -> str | None:
-    try:
-        request_compass("/chat/completions", {"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 5, "temperature": 0})
-    except CompassError as error:
-        return str(error)
-    return None
+    error = check_failure(model)
+    return str(error) if error else None
+
 
 def answer_cases(model: str, cases: list[dict[str, Any]], on_answer: Callable[[int, int], None] | None = None, max_tokens: int = 256) -> list[dict[str, Any]]:
     results = []
