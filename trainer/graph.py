@@ -47,7 +47,6 @@ class WorkflowState(TypedDict, total=False):
     compass_models: list[str]
     quality_provenance: dict[str, Any] | None
     model_benchmark: dict[str, Any]
-    benchmark_prices: dict[str, Any]
     analysis_limit: int
     task_description: str
     success_metric: str
@@ -857,7 +856,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             results = await grade_results(state, dataset, results, INSTRUCTION)
         finally:
             clear_progress(state)
-        results,prices=apply_review(results,{},state.get("benchmark_prices",{}))
+        results,prices=apply_review(results,{},{})
         summary=select_model(results,ids)
         summary["accuracyReview"] = accuracy_agent_review(results)
         return {"model_benchmark":{**summary,"splitManifestId":state["split_manifest_id"],"instruction":INSTRUCTION,"maxOutputTokens":MAX_TOKENS,"prices":prices},"status":"awaiting_model_selection"}

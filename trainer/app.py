@@ -96,7 +96,6 @@ class WorkflowRequest(BaseModel):
     analysis_limit: int = Field(default=50, ge=1, le=200)
     task_description: str = Field(default="", max_length=2000)
     success_metric: str = Field(default="", max_length=2000)
-    gpu_hourly_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     knowledge_documents: list[dict] = Field(default_factory=list, max_length=50)
     auto_analysis: bool = True
     analysis_only: bool = False
@@ -734,7 +733,6 @@ async def create_workflow(request: WorkflowRequest) -> dict:
         "workflow_id": workflow_id,
         "benchmark_selection": not bool(provenance),
         "quality_provenance": provenance,
-        "benchmark_prices": {"hourlyCostUsd":request.gpu_hourly_cost_usd},
         "knowledge_documents": request.knowledge_documents,
         "analysis_limit": request.analysis_limit,
         "task_description": request.task_description,

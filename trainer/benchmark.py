@@ -33,14 +33,11 @@ def select_model(results, ids):
     # ponytail: fixed 2-point tolerance; add confidence intervals for larger benchmarks.
     contenders=[r for r in complete if r["qualityEvidence"]["score"] >= best - .02]
     winner=min(contenders,key=lambda r: (r["costUsd"] if known_cost else 0,r["meanLatencySeconds"],r["modelId"]))
-    return {**summary,"winner":winner["modelId"],"status":"selected","costUsed":known_cost,"reason":"Highest measured correctness, with cost then latency breaking ties within 2 percentage points." + (" Cost not compared: local models run on your VM and have no per-answer price." if not known_cost else " Cost uses the charges Compass reported.")}
+    return {**summary,"winner":winner["modelId"],"status":"selected","costUsed":known_cost,"reason":"Highest measured correctness, with cost then latency breaking ties within 2 percentage points." + (" Cost not compared: a Compass model reported no price." if not known_cost else " Cost uses the charges Compass reported; models on your VM count as free.")}
 
 
 def apply_review(results, response, prices):
-    hourly=response.get("hourlyCostUsd",prices.get("hourlyCostUsd"))
     rates=response.get("tokenPrices",prices.get("tokenPrices",{}))
-    if hourly is not None and (not number(hourly) or hourly < 0):
-        raise ValueError("Hourly cost must be a finite non-negative USD amount.")
     if not isinstance(rates,dict):
         raise ValueError("Token prices must be keyed by model.")
     for rate in rates.values():
@@ -55,7 +52,7 @@ def apply_review(results, response, prices):
     for original in results:
         r=dict(original)
         if r.get("provider")=="local":
-            r["costUsd"]=r["inferenceSeconds"]*hourly/3600 if hourly is not None and number(r.get("inferenceSeconds")) else None
+            r["costUsd"]=0.0  # Models on the user's own VM count as free.
         else:
             # Compass bills each answer (usage.price_cost, USD); a charge it reported beats typed-in token prices.
             r["costUsd"]=(r.get("usage") or {}).get("price_cost")
@@ -73,7 +70,7 @@ def apply_review(results, response, prices):
         complete=[r for r in reviewed if r.get("status")=="complete"]
         if any(r.get("qualityEvidence",{}).get("rubric")!=rubric.strip() for r in complete):
             raise ValueError("Grade all completed models with the same rubric.")
-    return reviewed,{"hourlyCostUsd":hourly,"tokenPrices":rates}
+    return reviewed,{"tokenPrices":rates}
 
 
 def compass_results(job, benchmark, rows):
