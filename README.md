@@ -9,14 +9,15 @@ local NVIDIA GPU or on the `gcp-dev` VM.
 
 ```
 Browser ──► Node web server (server.mjs, :4173) ──► Trainer API (trainer/app.py, FastAPI + LangGraph)
-                    │                                        │
-                    └──► Compass API (optional, hosted)      ├──► local GPU ≥24 GB (:8000), or
+                                                             │
+                                                             ├──► Compass API (optional, hosted)
+                                                             ├──► local GPU ≥24 GB (:8000), or
                                                              └──► gcp-dev VM, 2× T4 (:18000 via SSH tunnel)
                                                                       │
                                          runtime data: datasets, runs, adapters, quality.sqlite, GPU ledger
 ```
 
-- **Web server** (`server.mjs`, `public/`, `index.html`): serves the UI and keeps API keys (Compass) server-side.
+- **Web server** (`server.mjs`, `public/`, `index.html`): serves the UI and proxies `/api/*` to the trainer; it holds no API keys.
 - **Trainer** (`trainer/`): dataset import and audit, LangGraph workflow, training, evaluation, and the quality pilot.
 - **Runtime data** (`trainer/data/`, `.forge-data/`): never committed.
 
@@ -84,7 +85,6 @@ on **Evaluations** (TAIDE with that run's adapter), then start a judge panel on 
 
 ```powershell
 python -m pytest trainer -q
-node --test test-compass.mjs
 node test/test-quality-panel.cjs
 ```
 
@@ -109,8 +109,8 @@ benchmarking. These are a recorded experiment brief, not an automatically
 validated custom scoring function. Evaluation size is configurable from 1 to
 200 examples per phase (default 50, bounded by available rows). Under 30
 examples is explicitly exploratory; even larger synthetic samples are not
-evidence of production quality. Hosted Compass comparisons retain their
-9-question limit and cannot join a larger local benchmark.
+evidence of production quality. Compass models approved in the model plan
+answer the same development questions as the local models.
 
 Dataset audits sample up to 600 rows reproducibly across the entire dataset,
 not just its prefix. Privacy findings retain original row IDs. Splits keep
@@ -329,24 +329,24 @@ Local mode requires CUDA-enabled PyTorch in `.venv`. VM mode requires a Python 3
 
 ### Advisor API configuration and quality validation
 
-The backend loads `trainer/.env`, then `.env` in its startup directory without overriding existing variables. Copy `trainer/.env.example` there and fill in `ADVISOR_BASE_URL`, `ADVISOR_API_KEY`, and `ADVISOR_MODEL` for an OpenAI-compatible endpoint. The advisor hook assists dataset analysis. The separate Compass controls described below run external model comparisons from the workflow page. `GET /advisor/status` reports whether all three values are present. Use the exact variable names in the example. The corrected root `.env` successfully listed 261 Compass model IDs. A separate approved benchmark completed nine gpt-4.1-mini answers and eight Qwen2.5-32B-Instruct answers; the last Qwen question remained rate-limited. This does not configure the VM advisor automatically.
+The backend loads `trainer/.env`, then `.env` in its startup directory without overriding existing variables. Copy `trainer/.env.example` there and fill in `ADVISOR_BASE_URL`, `ADVISOR_API_KEY`, and `ADVISOR_MODEL` for an OpenAI-compatible endpoint. The advisor hook assists dataset analysis. The trainer uses the same Compass key to pick models, check that they respond, and answer benchmark questions. `GET /advisor/status` reports whether all three values are present. Use the exact variable names in the example. The corrected root `.env` successfully listed 261 Compass model IDs. A separate approved benchmark completed nine gpt-4.1-mini answers and eight Qwen2.5-32B-Instruct answers; the last Qwen question remained rate-limited. This does not configure the VM advisor automatically.
 
 The tested trainer uses TRL 0.22 and Transformers 4.x.
 
 
 ## Integrated Nemotron workflow
 
-Open a dataset workflow to use automatic base/prompt/RAG trials, view live training steps and token retention, and compare hosted models with Compass. Reference uploads accept independent text or Markdown documents; retrieval is per question, and zero matching sources is reported without concluding that RAG is unnecessary. Prompt/RAG results remain visible while training runs and after it completes.
+Open a dataset workflow to use automatic base/prompt/RAG trials, and view live training steps and token retention. Reference uploads accept independent text or Markdown documents; retrieval is per question, and zero matching sources is reported without concluding that RAG is unnecessary. Prompt/RAG results remain visible while training runs and after it completes.
 
-The local website server reads the root `.env` using Node's built-in environment loader (Node 22+). `ADVISOR_BASE_URL` must be `https://compass.llm.shopee.io/compass-api/v1`, and `ADVISOR_API_KEY` must hold an active Compass key. The website keeps its own copy; the VM trainer reads a separate copy from trainer/.env (never committed) for model picking and Compass benchmark answers. The key is never sent to the browser. `ADVISOR_MODEL` still selects the optional dataset advisor model on a backend where that configuration is installed. The Compass comparison lets users choose one or two IDs returned by the live model catalog independently.
+The website does not call Compass and needs no `ADVISOR_*` values. Only the trainer does: it reads `ADVISOR_BASE_URL` (which must be `https://compass.llm.shopee.io/compass-api/v1`) and `ADVISOR_API_KEY` (an active Compass key) from `trainer/.env` (never committed) for model picking, model checks and Compass benchmark answers. The key is never sent to the browser. `ADVISOR_MODEL` still selects the optional dataset advisor model on a backend where that configuration is installed.
 
-`GET /api/compass/models` lists IDs. `GET/POST /api/workflow/runs/{id}/compass?phase=development|heldout` reads or starts a resumable comparison, limited to 1–9 questions and 256 output tokens each. Final reference answers are removed; final-test questions are unavailable until the local workflow completes. Each comparison button sends the chosen questions to Compass. Results stay in the root `.forge-data/compass/` directory; repeat the same request to resume only missing answers after a rate limit or restart. Models that appear in the catalog can still reject generation or lack permissions. These exploratory free-form comparisons do not produce a validated accuracy score.
+The Compass catalog can list models that this key cannot run. Before showing the model plan, the trainer sends each Compass model the picker proposed one short request and moves any that fail to the excluded list. Adding a Compass model by hand calls `GET /api/compass/check?model=<id>` (the trainer's `GET /compass/check`) first and adds only models that answer.
 
 Training now uses the development split for epoch validation. The final split is reserved for the paired base/adapter comparison after training. Full tuned answers, source retrievals, training metrics, and actual token retention are retained. A completed adapter is not automatically deployed.
 
 The general-assistant Nemotron pilot uses 200 shuffled conversations that fit 2,048 tokens, excludes the earlier test questions, and splits into 170 training / 10 development / 20 final examples. Three development examples are used for the bounded prompt/RAG checks. It is a pilot on shorter conversations, not a full-dataset or long-context benchmark.
 
-Checks: `python -m pytest trainer -q`; `node --test test-compass.mjs`; browser scripts `test/test-integrated-tools.cjs`, `test/test-workflow-prompts.cjs`, and `test/test-datasets.cjs` (set `PLAYWRIGHT_MODULE` if using a bundled Playwright installation).
+Checks: `python -m pytest trainer -q`; browser scripts `test/test-integrated-tools.cjs`, `test/test-workflow-prompts.cjs`, and `test/test-datasets.cjs` (set `PLAYWRIGHT_MODULE` if using a bundled Playwright installation).
 
 
 ### Development benchmark model selection
@@ -367,8 +367,8 @@ For completed workflows, **Run automatic evaluation** calls `POST /api/workflow/
 
 The highest correctness score defines a shortlist within two percentage points. Lower cost, then lower mean answer latency, breaks ties within that shortlist. This is a provisional small-sample policy, not a statistical significance claim. `gpu_hourly_cost_usd` can be supplied when creating a workflow; the review screen also accepts a VM hourly rate and Compass input/output rates in USD per million tokens. Local cost is measured answer-generation time (including prefill) times the VM hourly rate. It excludes loading and diagnostic loss passes. Hosted cost uses recorded token usage. These are rate-based inference estimates, not invoices, training costs or amortized serving costs. Unknown costs block automatic selection unless the user explicitly chooses to exclude cost for all models.
 
-At the model review checkpoint, the existing Compass form locks the split, number of questions and prompt to this benchmark. Run one or two text models, then use **Use these results in model selection**. A successful hosted candidate can win; the workflow retains it as the untuned baseline and never sends a hosted model to local fine-tuning. Local winners proceed through the prompt/RAG workflow and training approval.
+Compass models approved in the model plan answer the same development questions, instruction and output cap as the local models. A successful hosted candidate can win; the workflow retains it as the untuned baseline and never sends a hosted model to local fine-tuning. Local winners proceed through the prompt/RAG workflow and training approval.
 
 Existing saved workflows retain their original decisions. **Benchmark models on this dataset** creates a new workflow using the same dataset and split seed. Previously inspected final results remain historical; use a fresh untouched final set before claiming a new model improvement.
 
-Checks: `.venv/Scripts/python.exe -m pytest trainer -q`, `node --test test-compass.mjs`, and `node test/test-model-selection.cjs` (set `PLAYWRIGHT_MODULE` if Playwright is supplied by the desktop runtime).
+Checks: `.venv/Scripts/python.exe -m pytest trainer -q` and `node test/test-model-selection.cjs` (set `PLAYWRIGHT_MODULE` if Playwright is supplied by the desktop runtime).

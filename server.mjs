@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {handleCompass} from "./compass.mjs";
 import {streamTrainer} from "./quality-proxy.mjs";
 
 try {process.loadEnvFile(fileURLToPath(new URL("./.env", import.meta.url)));} catch(error) {if(error.code!=="ENOENT") throw error;}
@@ -25,7 +24,6 @@ async function callTrainer(path, request) {
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://" + request.headers.host);
-  if (await handleCompass(request, response, url, trainerUrl)) return;
   if (url.pathname === "/api/hardware") {
     try {
       const result = await callTrainer("/hardware", request);

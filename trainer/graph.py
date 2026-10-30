@@ -842,7 +842,7 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
                     except Exception as error:
                         record={"status":"unavailable","message":str(error)[:300]}
                     results.append({**record,"modelId":candidate["model"]["id"],"provider":"local"})
-            # Hosted answers need no GPU; build cases exactly as /comparison-inputs does so compass_results accepts them.
+            # Hosted answers need no GPU; build cases from the same development questions so compass_results accepts them.
             for index,model in enumerate(hosted,len(state["candidates"])+1):
                 report_progress(state,f"Answering with {model} on Compass · model {index} of {total} · {len(ids)} questions")
                 try:
@@ -870,22 +870,14 @@ def build_workflow_graph(services: WorkflowServices, checkpointer: Any) -> Any:
             if selected["provider"]=="compass":
                 return {"status":"complete","comparison":{"decision":"keep_baseline","pairs":[],"modelIds":[winner],"instruction":INSTRUCTION,"decisionReason":"The development benchmark selected a hosted Compass model. This model is retained as the baseline; local fine-tuning is not applicable. Validate it on untouched final questions before deployment."}}
             return {"candidates":[c for c in state["candidates"] if c["model"]["id"]==winner],"status":"baseline"}
-        response=interrupt({"type":"model_selection","message":benchmark.get("error") or benchmark["reason"],"benchmark":benchmark,"actions":["select_best","add_compass","abort"]})
+        response=interrupt({"type":"model_selection","message":benchmark.get("error") or benchmark["reason"],"benchmark":benchmark,"actions":["select_best","abort"]})
         if not isinstance(response,dict):
             return {"model_benchmark":{**benchmark,"error":"Review the model benchmark."}}
         if response.get("action")=="abort": return {"status":"cancelled"}
         try:
             results=benchmark["results"]
-            if response.get("action")=="add_compass":
-                ref=state["dataset"];dataset=load_source(ref["source"],ref["name"],ref.get("extension"))
-                rows=[dataset[i] for i in benchmark["developmentIds"]]
-                added=compass_results(response.get("job"),benchmark,rows)
-                added = await grade_results(state, dataset, added, INSTRUCTION)
-                if any(r["provider"]=="local" and r["modelId"] in {a["modelId"] for a in added} for r in results):
-                    raise ValueError("Hosted model IDs must differ from local benchmark IDs.")
-                results=[r for r in results if r["modelId"] not in {a["modelId"] for a in added}]+added
-                if len(results)>9: raise ValueError("This pilot compares at most nine models: the seven planned plus two added from Compass.")
-            elif response.get("action")!="select_best": raise ValueError("Choose a benchmark action.")
+            if response.get("action")!="select_best": raise ValueError("Choose a benchmark action.")
+            if len(results)>MAX_LOCAL+MAX_COMPASS: raise ValueError(f"This pilot compares at most {MAX_LOCAL+MAX_COMPASS} models.")
             results,prices=apply_review(results,response,benchmark.get("prices",{}))
             summary=select_model(results,benchmark["developmentIds"])
             summary["accuracyReview"] = accuracy_agent_review(results)

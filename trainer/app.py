@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Query
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -795,31 +795,6 @@ async def get_workflow(workflow_id: str) -> dict:
                 run["trainingContext"] = json.loads(context_path.read_text(encoding="utf-8"))
             training_records.append(run)
     return public_workflow({**state, **record, "state":state, "trainingRecords":training_records, "progress":progress})
-
-
-@app.get("/workflow/runs/{workflow_id}/comparison-inputs")
-async def workflow_comparison_inputs(workflow_id: uuid.UUID, phase: Literal["development", "heldout"] = "development", limit: int = Query(default=3, ge=1, le=9), allow_sensitive_data: bool = Query(default=False)) -> dict:
-    from advisor import evaluation_messages
-    record = await get_workflow(str(workflow_id))
-    state = record["state"]
-    if phase == "heldout" and record["status"] != "complete":
-        raise HTTPException(409, "Final test questions remain sealed until this workflow completes.")
-    privacy = state.get("privacy_review") or {}
-    if privacy.get("status") == "review" and not allow_sensitive_data:
-        raise HTTPException(409, "Privacy agent flagged sensitive values in the selected examples. Review the dataset or explicitly confirm sending them to a hosted model.")
-    if not state.get("split_manifest_path"):
-        raise HTTPException(409, "Wait for dataset analysis to create the split.")
-    manifest = json.loads(Path(state["split_manifest_path"]).read_text(encoding="utf-8"))
-    ref = manifest["evalDataset"] if phase == "heldout" else state["dataset"]
-    dataset = load_source(ref["source"], ref["name"], ref.get("extension"))
-    indices = (manifest.get("evaluationIds", manifest.get("evalIndices", [])) if phase == "heldout" else manifest.get("developmentIndices", []))[:limit]
-    instruction = state.get("model_benchmark",{}).get("instruction") if state.get("status")=="awaiting_model_selection" else state.get("selected_instruction")
-    instruction = instruction or "Answer accurately and concisely. Follow the requested language and output format exactly. Ask a brief clarification if essential information is ambiguous."
-    cases = []
-    for index in indices:
-        messages, _ = evaluation_messages(dataset[index], instruction)
-        cases.append({"rowId":index, "messages":[m for m in messages if not (m["role"] == "system" and not m["content"].strip())]})
-    return {"workflowId":str(workflow_id), "maxOutputTokens":256, "phase":phase, "splitManifestId":state.get("split_manifest_id"), "datasetFingerprint":manifest.get("datasetFingerprint"), "instruction":instruction, "privacyReview":privacy, "cases":cases}
 
 
 async def regrade_workflow(record: dict) -> None:
