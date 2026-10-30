@@ -13,8 +13,11 @@ MAX_COMPASS = 3
 INSTRUCTION = (
     "You pick models for a benchmark before fine-tuning. From the offered local and Compass models, choose the ones worth comparing for this task. "
     'Return JSON only: {"recommendation": str, "models": [{"id": str, "provider": "local"|"compass", "reason": str}], "excluded": [{"id": str, "reason": str}]}. '
-    f"Use only offered ids; at most {MAX_LOCAL} local and {MAX_COMPASS} compass models; give a short reason for each."
+    f"Use only offered ids; at most {MAX_LOCAL} local and {MAX_COMPASS} compass models; give a short reason for each. "
+    "pastResults lists earlier benchmark results for this task type: prefer models with strong past results, avoid models that failed, "
+    "and cite past results in your reasons when relevant."
 )
+HISTORY_KEYS = ("modelId", "provider", "runs", "scoredRuns", "meanScore", "meanCostUsd", "meanLatencySeconds", "lastDate", "lastStatus")
 
 
 def eligible(local: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -37,7 +40,7 @@ def plain_facts(facts: Any) -> dict[str, Any]:
     return kept
 
 
-def build_prompt(brief: dict[str, Any], profile: dict[str, Any], memory_gb: int, local: list[dict[str, Any]], compass: list[str]) -> str:
+def build_prompt(brief: dict[str, Any], profile: dict[str, Any], memory_gb: int, local: list[dict[str, Any]], compass: list[str], history: list[dict[str, Any]] | None = None) -> str:
     classification = profile.get("classification")
     classification = {key: classification.get(key) for key in ("task", "confidence", "source")} if isinstance(classification, dict) else None
     models = [{"id": item["model"]["id"], **{key: item["model"].get(key) for key in ("sizeB", "vram", "task")}} for item in eligible(local)]
@@ -48,6 +51,7 @@ def build_prompt(brief: dict[str, Any], profile: dict[str, Any], memory_gb: int,
         "gpuMemoryGb": memory_gb,
         "localModels": models,
         "compassModels": compass,
+        "pastResults": [{key: row.get(key) for key in HISTORY_KEYS} for row in history or [] if isinstance(row, dict)],
     })
 
 
@@ -69,9 +73,9 @@ def valid_entries(items: Any, allowed: dict[str, str], keep_provider: bool) -> l
     return result
 
 
-def propose_models(brief: dict[str, Any], profile: dict[str, Any], memory_gb: int, local: list[dict[str, Any]], compass: list[str]) -> dict[str, Any]:
+def propose_models(brief: dict[str, Any], profile: dict[str, Any], memory_gb: int, local: list[dict[str, Any]], compass: list[str], history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     allowed = {**{model_id: "compass" for model_id in compass}, **{item["model"]["id"]: "local" for item in eligible(local)}}
-    messages = [{"role": "system", "content": INSTRUCTION}, {"role": "user", "content": build_prompt(brief, profile, memory_gb, local, compass)}]
+    messages = [{"role": "system", "content": INSTRUCTION}, {"role": "user", "content": build_prompt(brief, profile, memory_gb, local, compass, history)}]
     try:
         data = parse_reply(chat(os.environ.get("ADVISOR_MODEL") or "gpt-4.1-mini", messages, max_tokens=1500)["output"])
         models = valid_entries(data.get("models"), allowed, True)
